@@ -182,7 +182,7 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
             key = data.get("tool_use_id") or call_id
             if key:
                 tool_spans[key] = trace.get_tracer("agentteams.claude-code").start_span("claude-code.tool",
-                    attributes={"gen_ai.tool.name": name, "gen_ai.tool.call.id": key,
+                    attributes={"langfuse.observation.type":"tool", "gen_ai.tool.name": name, "gen_ai.tool.call.id": key,
                                 "agentteams.session.id": data.get("session_id") or ""})
                 if interaction:
                     await interaction.tool(key, name, fields, "running")
@@ -329,6 +329,7 @@ async def receive(client, interaction, watcher, span, refreshed, prompt, task):
                         await reader
             if isinstance(message, SystemMessage) and message.subtype == "init":
                 span.set_attribute("agentteams.session.id", message.data.get("session_id") or "")
+                span.set_attribute("langfuse.session.id", message.data.get("session_id") or "")
                 span.set_attribute("agentteams.turn.id", message.data.get("uuid") or "")
                 if interaction:
                     interaction.session = message.data.get("session_id")
