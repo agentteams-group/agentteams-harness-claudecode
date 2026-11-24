@@ -221,7 +221,8 @@ def recover_work(state, client, record, provider, assignments):
         def current():
             saved = recovery.current(task_id, team)
             actual = saved.get("execution") or {} if saved else {}
-            owned = bool(saved and saved["status"] != "cancelled" and actual.get("state") in {"active", "needs_verification"}
+            settling = bool(saved and actual.get("state") == "released" and saved["status"] in {"submitted", "completed"})
+            owned = bool(saved and saved["status"] != "cancelled" and (actual.get("state") in {"active", "needs_verification"} or settling)
                          and all(actual.get(k) == identity[k] for k in ("generation", "instance_id", "process_id")))
             if not owned:
                 trace("task.ownership_lost", task_id=task_id, expected={k:identity[k] for k in ("generation","instance_id","process_id")},

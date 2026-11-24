@@ -194,18 +194,19 @@ class NativeRecovery(unittest.TestCase):
             self.recovery.prepare_reply.assert_called_once_with("child", "team", "answer")
             self.assertEqual(delivery.call_args.args[-1], "immutable business report")
 
-    def test_own_running_tool_is_not_mistaken_for_lost_execution(self):
-        with tempfile.TemporaryDirectory() as directory:
-            self.rpc.side_effect = [{"ok": True}, {"execution": "child", "context": {"outputDirectory": directory}, "fact": "ready"}, {"outputDirectory": directory}]
-            self.recovery.resume_text.return_value = "checkpoint"
-            pending={**self.task,"execution":{**self.execution,"state":"needs_verification", "checkpoint":{"operation":{"id":"tools:native","state":"started"}}}}
-            self.recovery.current.side_effect=[pending,None]
-            async def actual_scope(*_args,**kwargs):
-                self.assertTrue(kwargs["interaction"].current(),"The native tool still owns its journaled in-flight operation")
-                return "session","answer"
-            self.go.side_effect=actual_scope
-            with patch.dict(os.environ,AGENTTEAMS_PLUGIN_DIR=directory),patch("task_worker.require_unencrypted_room"):
-                self.run_scan()
+    def test_own_running_tool_and_terminal_feedback_are_not_lost_execution(self):
+        for status,state in (("in_progress","needs_verification"),("completed","released")):
+            with self.subTest(status=status),tempfile.TemporaryDirectory() as directory:
+                self.rpc.side_effect = [{"ok": True}, {"execution": "child", "context": {"outputDirectory": directory}, "fact": "ready"}, {"outputDirectory": directory}]
+                self.recovery.resume_text.return_value = "checkpoint"
+                pending={**self.task,"status":status,"execution":{**self.execution,"state":state}}
+                self.recovery.current.side_effect=[pending,None]
+                async def actual_scope(*_args,**kwargs):
+                    self.assertTrue(kwargs["interaction"].current(),"The same native process is still running or settling its terminal tool")
+                    return "session","answer"
+                self.go.side_effect=actual_scope
+                with patch.dict(os.environ,AGENTTEAMS_PLUGIN_DIR=directory),patch("task_worker.require_unencrypted_room"):
+                    self.run_scan()
 
     def test_lost_claim_skips_obsolete_work(self):
         from task_recovery import RecoveryConflict
