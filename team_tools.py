@@ -13,7 +13,8 @@ from mcp.common.task_context import COORDINATION_PHASES
 
 
 def prepare(event, role):
-    context = {"role": role, "sourceEvent": event["event_id"], "sources": []}
+    context = {"role": role, "sourceEvent": event["event_id"], "sources": [],
+               "actor": os.environ.get("AGENTTEAMS_MATRIX_USER_ID", "")}
     packet = (event.get("_task_protocol_meta") or {}).get("teamharness_coordination")
     if packet:
         if packet["kind"] == "task_assigned":
@@ -76,6 +77,10 @@ def serve(context):
                     temporary.replace(target)
                 closed = bool(outcome.get("phaseComplete") or outcome.get("requiresInputCheckpoint"))
                 result = outcome.get("result", outcome)
+                if outcome.get("phaseComplete") and outcome.get("receiptId") and outcome.get("fact"):
+                    task = result.get("task") or {}
+                    outcome = {**{key: outcome[key] for key in ("phaseComplete", "receiptId", "fact", "displayText", "extraReceipts") if key in outcome},
+                               "task": {key: task[key] for key in ("id", "status", "submissionId", "completionId", "planId") if key in task}}
                 response = {"jsonrpc": "2.0", "id": req["id"], "result": {
                     "isError": result.get("ok") is False,
                     "content": [{"type": "text", "text": json.dumps(outcome, ensure_ascii=False)}]}}

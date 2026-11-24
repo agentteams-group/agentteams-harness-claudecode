@@ -15,6 +15,25 @@ import turn
 
 
 class WorkerRegression(unittest.TestCase):
+    def test_receipts_without_a_native_project_do_not_break_startup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);config=root/"runtime.yaml"
+            def storage(*args):
+                if args[0]=="cp":
+                    Path(args[-1]).write_text("{}")
+                    return ""
+                if args[0]=="ls":
+                    path=args[-1]
+                    if path.endswith("/runtime/"):return ""
+                    if path.endswith("/claude-code/"):return '{"key":"receipts/"}\n'
+                    return '{"key":"claude-code/"}\n'
+                raise AssertionError("Unexpected storage mutation: "+str(args))
+            with patch.dict(os.environ,TEAMHARNESS_WORKSPACE=str(root/"workspace"),CLAUDE_CONFIG_DIR=str(root/".claude"),
+                            AGENTTEAMS_STORAGE_PREFIX="test/bucket",AGENTTEAMS_WORKER_NAME="cc"), patch("bridge.mc",side_effect=storage):
+                state=bridge.MemberState(config)
+            self.assertEqual(state.data["events"],{})
+
+
     def test_equal_text_is_not_a_duplicate_input(self):
         events = [{"event_id": eid, "sender": "@human:test", "room_id": "!room:test", "body": "Create a report"}
                   for eid in ("$one", "$two", "$two")]
@@ -148,7 +167,7 @@ class NativeRecovery(unittest.TestCase):
             self.state.projects.mkdir()
             self.sessions.load.return_value["cache"] = {"native_ref": "6ab33aae-6bba-4dde-98f7-1470288419ba"}
             self.recovery.resume_text.return_value = "confirmed facts"
-            self.rpc.side_effect = [{"ok": True}, {"execution": "child", "context": {"outputDirectory": directory}, "fact": "inputs ready"}] * 2
+            self.rpc.side_effect = [{"ok": True}, {"execution": "child", "context": {"outputDirectory": directory}, "fact": "inputs ready"}, {"outputDirectory": directory}] * 2
             self.recovery.current.return_value = None
             with patch.dict(os.environ, AGENTTEAMS_PLUGIN_DIR=directory), patch("task_worker.require_unencrypted_room"):
                 self.run_scan()
@@ -161,6 +180,32 @@ class NativeRecovery(unittest.TestCase):
                 self.run_scan()
                 self.assertEqual(self.go.await_args.args[4], ref)
             self.assertEqual(self.go.await_args.args[5]["identity"]["generation"], 4)
+
+    def test_direct_completed_submission_still_delivers_immutable_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.rpc.side_effect = [{"ok": True}, {"execution": "child", "context": {"outputDirectory": directory}, "fact": "ready"}, {"outputDirectory": directory}]
+            self.recovery.resume_text.return_value = "confirmed facts"
+            saved = {**self.task, "status": "completed"}
+            self.recovery.current.return_value = saved
+            completed = {**saved, "execution": {**self.execution, "checkpoint": {"delivery": "pending"}}}
+            self.recovery.prepare_reply.return_value = (completed, "immutable business report")
+            with patch.dict(os.environ, AGENTTEAMS_PLUGIN_DIR=directory), patch("task_worker.require_unencrypted_room"), patch("task_worker.deliver") as delivery:
+                self.run_scan()
+            self.recovery.prepare_reply.assert_called_once_with("child", "team", "answer")
+            self.assertEqual(delivery.call_args.args[-1], "immutable business report")
+
+    def test_own_running_tool_is_not_mistaken_for_lost_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.rpc.side_effect = [{"ok": True}, {"execution": "child", "context": {"outputDirectory": directory}, "fact": "ready"}, {"outputDirectory": directory}]
+            self.recovery.resume_text.return_value = "checkpoint"
+            pending={**self.task,"execution":{**self.execution,"state":"needs_verification", "checkpoint":{"operation":{"id":"tools:native","state":"started"}}}}
+            self.recovery.current.side_effect=[pending,None]
+            async def actual_scope(*_args,**kwargs):
+                self.assertTrue(kwargs["interaction"].current(),"The native tool still owns its journaled in-flight operation")
+                return "session","answer"
+            self.go.side_effect=actual_scope
+            with patch.dict(os.environ,AGENTTEAMS_PLUGIN_DIR=directory),patch("task_worker.require_unencrypted_room"):
+                self.run_scan()
 
     def test_lost_claim_skips_obsolete_work(self):
         from task_recovery import RecoveryConflict
@@ -182,7 +227,7 @@ class NativeRecovery(unittest.TestCase):
                                "config_generation": 1, "expires_at": int(time.time()) + 300})
             self.sessions.usable.side_effect = WorkerSessions("claudecode", recovery=self.recovery).usable
             self.recovery.resume_text.return_value = "authoritative saved checkpoint"
-            self.rpc.side_effect = [{"ok": True}, {"execution": "child", "context": {"outputDirectory": directory}, "fact": "prepared"}]
+            self.rpc.side_effect = [{"ok": True}, {"execution": "child", "context": {"outputDirectory": directory}, "fact": "prepared"}, {"outputDirectory": directory}]
             self.recovery.current.return_value = None
             with patch.dict(os.environ, AGENTTEAMS_PLUGIN_DIR=directory), patch("task_worker.require_unencrypted_room"):
                 self.run_scan()

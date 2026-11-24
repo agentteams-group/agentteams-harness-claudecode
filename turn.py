@@ -38,8 +38,7 @@ def prepare_assets(record, bundle, plugin):
     prompts = list(paths["manager"].values()) if role == "manager" else [
         paths["team"], paths["agent"]["remoteMember" if role == "remote-member" else role]]
     context = [(bundle / path).read_text() for path in prompts]
-    if role == "manager":
-        context.append((bundle / "skills/team/task-management/SKILL.md").read_text().partition("## Plan as Leader")[0])
+    context.append((bundle / "skills/team/task-management/SKILL.md").read_text())
     context.append(json.dumps({key: record.get(key) for key in ("member", "team")}, ensure_ascii=False))
     context.extend((record["desired"].get("inlineConfig") or {}).values())
     skills = plugin / "skills"
@@ -70,6 +69,7 @@ def prepare_assets(record, bundle, plugin):
                 check_skill(source)
                 shutil.copytree(source, destination)
             check_skill(destination)
+            context.append((destination / "SKILL.md").read_text())
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             if name and Path(name).name == name and name not in {".", ".."}:
                 shutil.rmtree(skills / name, ignore_errors=True)
@@ -142,7 +142,7 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
         tools = ["AskUserQuestion"] if decision else ["Read", "Glob", "Grep", "Skill", "AskUserQuestion"]
         if not decision and role_of(record) != "manager":
             tools.extend(["Write", "Edit"])
-        if not decision and not task.get("execution") and (role_of(record) != "manager" or os.getenv("AGENTTEAMS_YOLO") == "1"):
+        if not decision and (role_of(record) != "manager" or os.getenv("AGENTTEAMS_YOLO") == "1"):
             tools.append("Bash")
         context = task.get("context") or {}
         identity = task.get("identity")
@@ -162,12 +162,14 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
                     raise ValueError("This execution has stopped")
                 if on_effect and name not in {"Read", "Glob", "Grep", "Skill", "AskUserQuestion"}:
                     on_effect()
+                if name == "Bash" and fields.get("run_in_background"):
+                    raise ValueError("Background commands require an asynchronous terminal receipt adapter")
                 if name in {"Read", "Write", "Edit", "Glob", "Grep"} and not file_allowed(
                         name, fields, workspace, (plugin / "skills").iterdir(), context):
                     raise ValueError("Outside the prepared input and output directories")
                 if recovery:
                     recovery.tools_current(identity)
-                    if name in {"Read", "Glob", "Grep", "Write", "Edit"}:
+                    if name in {"Read", "Glob", "Grep", "Write", "Edit", "Bash"}:
                         key = data.get("tool_use_id") or call_id
                         operation = recovery.begin_tools(identity, [{"id": key, "name": name, "arguments": fields,
                                                                    "read_only": name in {"Read", "Glob", "Grep"}}])
@@ -197,12 +199,22 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
                 if not success:
                     tool_span.set_status(trace.StatusCode.ERROR)
                 tool_span.end()
+            if success and data["tool_name"] == "mcp__teamharness__task":
+                completed = task_completion(response)
+                if completed:
+                    task["_completed"] = dict(completed, callId=key, sessionId=data.get("session_id"))
+                    if interaction:
+                        await interaction.tool(key, data["tool_name"], data.get("tool_input") or {}, "succeeded", response)
+                    return {"continue_": False, "stopReason": "Task phase completed"}
             if key in operations:
                 name = data["tool_name"]
                 if not success and name not in {"Read", "Glob", "Grep"}:
                     if interaction:
                         await interaction.tool(key, name, data.get("tool_input") or {}, "failed", data.get("error"))
                     return {}  # Keep the registered mutation unresolved until authoritative verification.
+                if name == "Bash" and (not isinstance(response, dict) or response.get("interrupted") is not False
+                        or response.get("backgroundTaskId") or response.get("background_task_id")):
+                    return {}  # No synchronous terminal evidence: retain admission for recovery.
                 artifacts = []
                 files = []
                 if success and name in {"Write", "Edit"}:
@@ -327,6 +339,13 @@ async def receive(client, interaction, watcher, span, refreshed, prompt, task):
                     result_span.set_attribute("gen_ai.response.model", message.model)
                     result_span.set_attribute("gen_ai.response.id", getattr(message, "message_id", None) or "")
             if isinstance(message, ResultMessage):
+                completed = task.get("_completed")
+                if completed:
+                    if not persisted_task_receipt(message.session_id, completed):
+                        raise RuntimeError("Task receipt is missing from the native session")
+                    if interaction:
+                        await interaction.status("completed")
+                    return message.session_id, completed.get("displayText") or completed["fact"]
                 if interaction and interaction.stopped:
                     raise TurnStopped(message.session_id)
                 if message.is_error or message.subtype != "success" or not message.result:
@@ -353,3 +372,44 @@ async def receive(client, interaction, watcher, span, refreshed, prompt, task):
             await interaction.status("failed")
             await interaction.block("ending", {"type": "error", "kind": "failed", "title": "Claude execution failed"}, "Claude execution failed")
         raise
+
+
+def task_completion(response):
+    if isinstance(response, list):
+        response = {"content": response}
+    if not isinstance(response, dict) or response.get("isError") or response.get("is_error"):
+        return None
+    for part in response.get("content") or []:
+        if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+            continue
+        try:
+            value, _ = json.JSONDecoder().raw_decode(part["text"].lstrip())
+        except ValueError:
+            continue
+        if isinstance(value, dict) and value.get("phaseComplete") is True and value.get("receiptId") and value.get("fact"):
+            return value
+    return None
+
+
+def persisted_task_receipt(session, completed):
+    if session != completed.get("sessionId"):
+        return False
+    projects = Path(os.getenv("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "projects"
+    for path in projects.glob("*/" + session + ".jsonl"):
+        for line in path.read_text().splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            content = (row.get("message") or {}).get("content")
+            if row.get("type") != "user" or not isinstance(content, list):
+                continue
+            for block in content:
+                if block.get("type") == "tool_result" and block.get("tool_use_id") == completed["callId"]:
+                    payload = block.get("content")
+                    if isinstance(payload, str):
+                        payload = [{"text": payload}]
+                    found = task_completion({"content": payload})
+                    if found and found["receiptId"] == completed["receiptId"]:
+                        return True
+    return False

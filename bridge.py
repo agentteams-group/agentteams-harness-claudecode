@@ -69,7 +69,8 @@ class MemberState:
             "cursor": None, "sessions": {}, "events": {}}
         if self.remote:
             keys = [json.loads(row)["key"] for row in mc("ls", "--json", self.remote + "/").splitlines()]
-            if "claude-code/" in keys:
+            native_keys = [json.loads(row)["key"] for row in mc("ls", "--json", self.remote + "/claude-code/").splitlines()] if "claude-code/" in keys else []
+            if "projects/" in native_keys:
                 # Preserve a newer local transcript if the previous process died before its upload.
                 with tempfile.TemporaryDirectory(dir=self.projects.parent) as incoming:
                     mc("mirror", "--overwrite", self.remote + "/claude-code/projects/", incoming)
@@ -214,7 +215,10 @@ def execute_input(state, client, record, provider, event, agents, matrix, claim)
         delivery = {}
         if role_of(record) == "manager" and os.getenv("AGENTTEAMS_CONTROLLER_URL") and not packet:
             delivery = native({"operation": "delivery_context", "room": room, "middle": middle, "inputText": body})
-        facts = {k: task[k] for k in ("fact", "context", "sources", "roster") if task.get(k)}
+        task["actor"] = record["member"]["matrixUserId"]
+        facts = {k: task[k] for k in ("fact", "sources", "roster") if task.get(k)}
+        if task.get("context"):
+            facts["context"] = native({"operation": "model_context", "context": task["context"]})
         prompt = "\n".join([*delivery.get("facts", []), *([json.dumps(facts, ensure_ascii=False)] if facts else []), body])
         task.update(room=room, coordination=packet, carrier=event.get("carrier", {}))
         slot.update(stage="inference", replayable=True, attempts=slot.get("attempts", 0) + 1)
