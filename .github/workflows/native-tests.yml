@@ -1,0 +1,33 @@
+name: Claude Code native tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  native-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: agentscope-ai/AgentTeams
+          ref: f2d5424f09976b1c2703a1732c64d19c93fcff6b
+          path: core
+      - name: Check out the pinned Matrix transport
+        run: git -C core submodule update --init deepseek-harness
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install -r requirements.txt
+      - name: Run SDK, Matrix and recovery tests
+        env:
+          AGENTTEAMS_CORE_DIR: ${{ github.workspace }}/core
+        run: python -m unittest discover -s tests -v
