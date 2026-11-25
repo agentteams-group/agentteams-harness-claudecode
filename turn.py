@@ -218,15 +218,16 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
                     return {"continue_": False, "stopReason": "Task phase completed"}
             if key in operations:
                 name = data["tool_name"]
-                if not success and name not in {"Read", "Glob", "Grep"}:
+                incomplete_bash = name == "Bash" and (not isinstance(response, dict)
+                    or response.get("interrupted") is not False or response.get("backgroundTaskId")
+                    or response.get("background_task_id"))
+                if incomplete_bash or (not success and name not in {"Read", "Glob", "Grep"}):
                     if interaction:
-                        await interaction.tool(key, name, data.get("tool_input") or {}, "failed", data.get("error"))
+                        await interaction.tool(key, name, data.get("tool_input") or {}, "failed",
+                            data.get("error") or "命令尚无可核验的结束结果。")
                     task["_unverified_tool"] = name
                     await client.interrupt()
                     return {"continue_": False, "stopReason": "Task tool effect requires verification"}
-                if name == "Bash" and (not isinstance(response, dict) or response.get("interrupted") is not False
-                        or response.get("backgroundTaskId") or response.get("background_task_id")):
-                    return {}  # No synchronous terminal evidence: retain admission for recovery.
                 artifacts = []
                 files = []
                 if success and name in {"Write", "Edit"}:
@@ -269,7 +270,8 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
                    "PostToolUseFailure": [HookMatcher(hooks=[after_tool])]},
             env={"ANTHROPIC_BASE_URL": provider["baseUrl"].rstrip("/").removesuffix("/v1"),
                  "ANTHROPIC_AUTH_TOKEN": provider["apiKey"], "ANTHROPIC_API_KEY": "",
-                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"},
+                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                 **({"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"} if identity else {})},
         )
         try:
             async with ClaudeSDKClient(options=options) as client:
@@ -353,7 +355,7 @@ async def receive(client, interaction, watcher, span, refreshed, prompt, task):
                     result_span.set_attribute("gen_ai.response.id", getattr(message, "message_id", None) or "")
             if isinstance(message, ResultMessage):
                 if task.get("_unverified_tool"):
-                    raise UnverifiedToolEffect(f"{task['_unverified_tool']} 执行失败，需要核对操作结果后继续。")
+                    raise UnverifiedToolEffect(f"{task['_unverified_tool']} 尚未确认执行结果，需要核对后继续。")
                 completed = task.get("_completed")
                 if completed:
                     if not persisted_task_receipt(message.session_id, completed):
