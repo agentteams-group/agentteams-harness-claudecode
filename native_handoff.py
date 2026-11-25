@@ -25,6 +25,7 @@ async def append_handoff(session, workspace, fact):
 
     # The SDK saves the user input before this hook ends the turn. This local
     # operation has no model credentials, tools, skills, or Matrix publisher.
+    workspace.mkdir(parents=True, exist_ok=True)
     options = ClaudeAgentOptions(cwd=str(workspace), resume=session, tools=[], setting_sources=[],
             strict_mcp_config=True, hooks={"UserPromptSubmit": [HookMatcher(hooks=[record_only])]},
             env={"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ANTHROPIC_AUTH_TOKEN": "local-only",

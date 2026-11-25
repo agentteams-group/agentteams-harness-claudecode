@@ -27,7 +27,10 @@ class NativeHandoffTest(unittest.TestCase):
                             self.assertFalse(message.is_error)
                             return message.session_id
 
+            root.mkdir()
             session = await chat("second-turn: begin the fixture.")
+            # A recreated Worker restores Claude projects before per-task directories.
+            root.rmdir()
             fact = "[Task handoff receipt]\nMatrix event $actually-sent. No action is needed."
             await append_handoff(session, root, fact)
             await append_handoff(session, root, fact)
@@ -44,6 +47,6 @@ class NativeHandoffTest(unittest.TestCase):
             try:
                 with patch.dict(os.environ, {"HOME": tmp, "CLAUDE_CONFIG_DIR": str(Path(tmp) / ".claude"),
                         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}, clear=True):
-                    asyncio.run(conversation(Path(tmp), f"http://127.0.0.1:{http.server_port}/route"))
+                    asyncio.run(conversation(Path(tmp) / "work", f"http://127.0.0.1:{http.server_port}/route"))
             finally:
                 http.shutdown()
