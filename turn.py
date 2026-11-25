@@ -144,7 +144,7 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
         if task.get("execution"):
             instructions += "\n读取和修改工作文件时使用 Read、Write 和 Edit。需要验证文件内容时可用已安装的 Python 3。使用其他命令行工具前先确认其可用性。"
         if task.get("planning"):
-            instructions += "\n规划时在 task plan 的 overview 中写明目标、要求、验收标准、节点分工和最终产物。保存后系统会先发布概要，再派单。"
+            instructions += "\n先从当前主任务核对用户指定的节点数、负责人和依赖；逐项按约定规划。领域 Skill 的默认流程只补充用户未指定的部分。规划时在 task plan 的 overview 中写明目标、要求、验收标准、节点分工和最终产物。保存后系统会先发布概要，再派单。"
         servers = mcp_servers(record, bundle, provider, task)
         refreshed = plugin / "refreshed.json"
         servers["teamharness"]["env"]["AT_CLAUDE_REFRESH_FILE"] = str(refreshed)
