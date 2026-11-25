@@ -23,6 +23,7 @@ from worker_runtime_config import project
 
 from turn import role_of, run_turn
 from task_worker import native, recover_work
+from native_handoff import flush_handoffs
 from worker_handoff import recovery_scanned
 from worker_sync import scan, deliver_message
 from interaction import MatrixTurn, TurnStopped
@@ -53,6 +54,7 @@ class MemberState:
     def __init__(self, config):
         self.config = config
         self.registered_start = False
+        self.handoff_checked = {}
         self.journal = config.parent / "claude-code.json"
         self.workspace = Path(os.environ["TEAMHARNESS_WORKSPACE"])
         self.projects = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects"
@@ -92,6 +94,13 @@ class MemberState:
         atomic_write(self.journal, json.dumps(self.data, ensure_ascii=False))
         if self.remote:
             mc("cp", self.journal, self.remote + "/runtime/" + self.journal.name)
+
+    def flush_task_handoffs(self, actor):
+        flush_handoffs(self.projects, self.handoff_checked, actor, native, self.backup_transcript)
+
+    def backup_transcript(self, path):
+        if self.remote:
+            mc("cp", path, self.remote + "/claude-code/projects/" + path.relative_to(self.projects).as_posix())
 
     def snapshot(self):
         if self.remote:
@@ -334,6 +343,7 @@ def poll(state, ready):
     worker = role_of(record) != "manager" and bool(os.getenv("AGENTTEAMS_CONTROLLER_URL"))
     if worker:
         matrix, pending, assignments = scan(client, record, transport, rooms, agents, ready, admitted, state.data["events"])
+        state.flush_task_handoffs(member["matrixUserId"])
         recover_work(state, client, record, provider, assignments)
         if not ready:
             subprocess.run(["agt", "worker", "report-ready", "--name", os.getenv("AGENTTEAMS_WORKER_CR_NAME")

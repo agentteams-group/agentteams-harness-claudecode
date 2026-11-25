@@ -238,6 +238,9 @@ def recover_work(state, client, record, provider, assignments):
                 Path(os.environ["AGENTTEAMS_PLUGIN_DIR"]), on_checkpoint=remember_checkpoint, interaction=interaction))
         except TurnStopped:
             continue  # Cancellation is authoritative; never submit a synthetic completion.
+        if (context.get("_completed") or {}).get("pendingHandoffs"):
+            # The authenticated tool result in this transcript is the durable pending record.
+            state.backup_transcript(next(state.projects.glob("*/" + ref + ".jsonl")))
         saved = recovery.current(task_id, team)
         if not saved or saved["status"] == "cancelled":
             continue
