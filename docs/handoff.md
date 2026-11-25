@@ -32,3 +32,15 @@ Follow the live guide's frozen-candidate rules. Cover role schema and native hoo
 ## Suggested layout
 
 Choose a language before adding build tooling. Keep the native adapter under `src/`, launcher under `scripts/`, native/contract tests under `tests/`, and measured acceptance evidence summaries under `docs/`. Add a Dockerfile and CI once those entrypoints exist. The initial scaffold intentionally has no executable placeholder that could be mistaken for a supported runtime.
+
+## Task context and completion follow-up
+
+Use Core's `model_context` bridge for prepared execution and coordination contexts. Associated Skills must be present in the actual native instructions, including phases where the Skill tool is unavailable. The original conversation ends after intake; full planning runs in the Task room.
+
+Match only the fixed registered Task tool's actual `PostToolUse` result. SDK 0.2.187 returns MCP content as a text-block list. A Core-validated `phaseComplete`/receipt closes continuation using `continue_=False`; verify the exact native JSONL tool result before accepting the terminal phase. The receipt and confirmed dispatch facts remain in native history without another generation or chat acknowledgement. Do not skip immutable report delivery when a direct-success node is already completed.
+
+Assigned execution may use synchronous Bash through the existing permission callback. Journal admission and a verified terminal response; deny background commands, and leave interrupted or unresolved mutations for verification. Native fixture tests cover one model request at Task completion, journaled Bash, retained-result delivery and cross-runtime cache boundaries. These tests do not replace real Task/trace/attachment acceptance or full admission certification.
+
+A journaled in-flight tool sets Core execution to `needs_verification`. While the same generation, instance and process still own it, this is not ownership loss and must not trigger an SDK interrupt. Normal tool/inference admission still requires a verified terminal operation; a replacement process reconciles the retained receipt before continuing.
+
+The matched Core contract is pinned to `f08cd8291c4004479660addb16fc7ecd7d08c591` ([Core PR #1725](https://github.com/agentscope-ai/AgentTeams/pull/1725)); build the Controller/CLI and shared assets from that same revision. Local mixed normal and rework Tasks are separate from full admission certification.

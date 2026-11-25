@@ -1,0 +1,41 @@
+"""Exercise the actual native Bash result shape inside an assigned Task."""
+import asyncio,json,os,tempfile,threading,unittest
+from pathlib import Path
+from http.server import ThreadingHTTPServer
+from unittest.mock import Mock,patch
+from test_member import ROOT,Wire
+from turn import run_turn
+
+class TaskBashTests(unittest.TestCase):
+    def test_task_bash_has_journaled_terminal_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp, ThreadingHTTPServer(('127.0.0.1',0),Wire) as http:
+            threading.Thread(target=http.serve_forever,daemon=True).start();self.addCleanup(http.shutdown)
+            http.requests=[];http.tool_name='Bash';http.tool_input={'command':'printf native-task-test'}
+            root=Path(tmp);recovery=Mock();recovery.begin_tools.return_value='tools:test'
+            recovery.finish_tools.return_value={'execution':{}}
+            task={'role':'worker','execution':'child','identity':{'task_id':'child','team_id':'team'},'context':{'outputDirectory':str(root)}}
+            import turn
+            actual_client=turn.ClaudeSDKClient
+            seen=[]
+            def client(*,options):
+                original=options.hooks['PostToolUse'][0].hooks[0]
+                async def observe(data,*args):
+                    seen.append(data.get('tool_response'))
+                    return await original(data,*args)
+                options.hooks['PostToolUse'][0].hooks[0]=observe
+                return actual_client(options=options)
+            with patch('turn.ClaudeSDKClient',side_effect=client), patch.dict(os.environ,{'HOME':tmp,'CLAUDE_CONFIG_DIR':str(root/'.claude'),
+                    'AGENTTEAMS_YOLO':'1','AGENTTEAMS_PLUGIN_DIR':str(ROOT/'plugins/teamharness')},clear=True), \
+                    patch('turn.Recovery',return_value=recovery),patch('turn.persist_terminal') as persist:
+                session,answer=asyncio.run(run_turn({'member':{'role':'worker','matrixUserId':'@cc:at'},'desired':{}},
+                    {'models':[{'id':'claude-sonnet-4-6'}],'baseUrl':f'http://127.0.0.1:{http.server_port}/route','apiKey':'fixture-gateway'},
+                    root,'Run the native check.',None,task,ROOT/'plugins/teamharness'))
+            self.assertEqual(answer,'first-ok')
+            call=recovery.begin_tools.call_args.args[1][0]
+            self.assertEqual(call['name'],'Bash')
+            self.assertTrue(persist.called)
+            recovery.finish_tools.assert_called_once()
+
+            self.assertTrue(seen)
+            self.assertIs(seen[0]["interrupted"],False)
+            self.assertEqual(seen[0]["stdout"],"native-task-test")

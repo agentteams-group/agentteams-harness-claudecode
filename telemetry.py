@@ -36,7 +36,14 @@ def turn_span(role, task, model):
     ids = [s["eventId"] for s in task.get("sources") or []]
     if not ids and task.get("sourceEvent"):
         ids = [task["sourceEvent"]]
-    fields = {"agentteams.harness": "claudecode", "agentteams.role": role, "gen_ai.request.model": model,
+    worker = os.getenv("AGENTTEAMS_WORKER_NAME", "unknown")
+    team = identity.get("team_id") or os.getenv("AGENTTEAMS_TEAM_NAME")
+    task_id = identity.get("task_id") or packet.get("task_id")
+    tags = ["agentteams", "worker-turn", "claudecode"]
+    tags.extend(label + ":" + value for label,value in (("task",task_id),("team",team),("room",task.get("room"))) if value)
+    fields = {"langfuse.user.id": worker, "langfuse.trace.tags": tags, "langfuse.observation.type":"agent",
+              "agentteams.worker.name":worker,"agentteams.runtime":"claudecode","agentteams.team.id":team,
+              "agentteams.harness": "claudecode", "agentteams.role": role, "gen_ai.request.model": model,
               "agentteams.input.event_ids": ids, "agentteams.event.id": task.get("sourceEvent"),
               "agentteams.room.id": task.get("room"), "agentteams.task.id": identity.get("task_id") or packet.get("task_id"),
               "agentteams.coordination.id": packet.get("id"), "agentteams.coordination.kind": packet.get("kind"),
@@ -70,7 +77,7 @@ def _export_requests(path, offset, started_ms, session_id, turn_error):
             elif row.get("type") == "assistant" and row.get("requestRef") in requests:
                 message = row.get("message") or {}
                 if message.get("stop_reason") or row.get("isApiErrorMessage"):
-                    responses[row["requestRef"]] = (timestamp, message.get("id"), bool(row.get("isApiErrorMessage")))
+                    responses[row["requestRef"]] = (timestamp, message.get("id"), bool(row.get("isApiErrorMessage")), message.get("usage") or {})
 
     tracer = trace.get_tracer("agentteams.claude-code")
     # For unanswered attempts only the next dispatch or turn exit is known.
@@ -78,12 +85,15 @@ def _export_requests(path, offset, started_ms, session_id, turn_error):
     error_type = type(turn_error).__name__ if turn_error is not None else "NoTerminalResponse"
     for request_id, next_id in pairwise([*requests, None]):
         start, model = requests[request_id]
-        fields = {"agentteams.model.request.id": request_id, "agentteams.session.id": session_id}
+        fields = {"agentteams.model.request.id": request_id, "agentteams.session.id": session_id, "langfuse.observation.type":"generation", "langfuse.session.id":session_id}
         if model:
             fields["gen_ai.request.model"] = model
         response = responses.get(request_id)
         if response:
-            end, response_id, failed = response
+            end, response_id, failed, usage = response
+            for key in ("input_tokens", "output_tokens"):
+                if type(usage.get(key)) is int:
+                    fields["gen_ai.usage." + key] = usage[key]
             if response_id:
                 fields["gen_ai.response.id"] = response_id
             fields["agentteams.model.end_observation"] = "assistant_message"

@@ -98,7 +98,10 @@ def deliver(client, recovery, record, task, team, answer):
         confirm_bound(saved["execution"], execution, "claudecode", checkpoint)
 
     event = publish_raw_saved(client, room, answer, execution["checkpoint"], record["member"]["matrixUserId"],
-                              bind, content={"org.agentteams.progress_only": True})
+                              bind, content={"org.agentteams.progress_only": True,
+                    "org.agentteams.run_id": task.get("notify_event_id") or "task:" + task["task_id"] + ":" + str(execution["generation"]),
+                    "org.agentteams.run": {"version": "1", "run_id": task.get("notify_event_id") or "task:" + task["task_id"] + ":" + str(execution["generation"]),
+                        "blocks": [{"type": "text", "text": answer}]}})
     return recovery.delivered(task["task_id"], team, event)
 
 
@@ -175,14 +178,14 @@ def recover_work(state, client, record, provider, assignments):
             registered_native = receipt.get("native_id") or ""
             if registered_native.startswith("matrix:$"):
                 source_id = registered_native.removeprefix("matrix:")
-        context.update(role="worker", identity=identity, room=task["room_id"], team=team,
+        context.update(role="worker", actor=record["member"]["matrixUserId"], identity=identity, room=task["room_id"], team=team,
                        coordination=(source.get("_task_protocol_meta") or {}).get("teamharness_coordination") or packet,
                        sourceEvent=source_id, carrier=source.get("carrier") or {})
 
         require_unencrypted_room(client, task["room_id"])
         directory = Path(context["context"]["outputDirectory"])
         restore(identity, cp, directory)
-        prompt = recovery.resume_text({**task, "team_id": team}) + "\n" + context["fact"] + "\n" + json.dumps(context["context"], ensure_ascii=False)
+        prompt = recovery.resume_text({**task, "team_id": team}) + "\n" + context["fact"] + "\n" + json.dumps(native({"operation": "model_context", "context": context["context"]}), ensure_ascii=False)
         if source:
             prompt += "\n[Message " + source["event_id"] + "]\n" + source["body"]
         trace("task.resume", task_id=task_id, generation=execution["generation"], reused_session=bool(session))
@@ -210,6 +213,7 @@ def recover_work(state, client, record, provider, assignments):
             return True
 
         admin = ((record.get("team") or {}).get("admin") or {}).get("matrixUserId")
+        task["notify_event_id"] = source_id or f"task:{task_id}:{execution['generation']}"
         event = {"event_id": source_id or f"task:{task_id}:{execution['generation']}", "room_id": task["room_id"],
                  "sender": source.get("sender") or admin or record["member"]["matrixUserId"],
                  "coordination_session": task_id}
@@ -217,8 +221,13 @@ def recover_work(state, client, record, provider, assignments):
         def current():
             saved = recovery.current(task_id, team)
             actual = saved.get("execution") or {} if saved else {}
-            return bool(saved and saved["status"] != "cancelled" and actual.get("state") == "active"
-                        and all(actual.get(k) == identity[k] for k in ("generation", "instance_id", "process_id")))
+            settling = bool(saved and actual.get("state") == "released" and saved["status"] in {"submitted", "completed"})
+            owned = bool(saved and saved["status"] != "cancelled" and (actual.get("state") in {"active", "needs_verification"} or settling)
+                         and all(actual.get(k) == identity[k] for k in ("generation", "instance_id", "process_id")))
+            if not owned:
+                trace("task.ownership_lost", task_id=task_id, expected={k:identity[k] for k in ("generation","instance_id","process_id")},
+                      actual={k:actual.get(k) for k in ("generation","instance_id","process_id","state")}, task_status=saved.get("status") if saved else "absent")
+            return owned
         interaction.current = current
         try:
             ref, answer = asyncio.run(run_turn(record, provider, directory, prompt, session, context,
@@ -226,7 +235,7 @@ def recover_work(state, client, record, provider, assignments):
         except TurnStopped:
             continue  # Cancellation is authoritative; never submit a synthetic completion.
         saved = recovery.current(task_id, team)
-        if not saved or saved["status"] in {"completed", "cancelled"}:
+        if not saved or saved["status"] == "cancelled":
             continue
         if saved["status"] in {"assigned", "in_progress"}:
             view = sessions.load(work)
