@@ -7,6 +7,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from uuid import uuid4
 from unittest.mock import patch
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage, get_session_messages
@@ -15,6 +16,29 @@ from native_handoff import append_handoff
 
 
 class NativeHandoffTest(unittest.TestCase):
+    def test_replay_finds_native_input_omitted_by_projected_history(self):
+        session, root_id = str(uuid4()), str(uuid4())
+        fact = "[Task handoff receipt]\nMatrix event $confirmed."
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": tmp}):
+            project = Path(tmp) / "projects" / "-work"
+            project.mkdir(parents=True)
+            transcript = project / (session + ".jsonl")
+            entries = [
+                (root_id, None, "Begin"),
+                (str(uuid4()), root_id, fact),
+                (str(uuid4()), root_id, "Continue a parallel branch"),
+            ]
+            transcript.write_text("".join(json.dumps({"uuid": uid, "parentUuid": parent,
+                    "sessionId": session, "type": "user", "cwd": "/work",
+                    "message": {"role": "user", "content": content}}) + "\n"
+                    for uid, parent, content in entries))
+            projected = [row.message["content"] for row in get_session_messages(session, directory="/work")]
+            self.assertIn("Continue a parallel branch", projected)
+            self.assertNotIn(fact, projected)
+            with patch("native_handoff.ClaudeSDKClient") as client:
+                asyncio.run(append_handoff(transcript, Path("/work"), fact))
+                client.assert_not_called()
+
     def test_receipt_survives_resume_and_replay_has_no_model_call(self):
         async def conversation(root, endpoint):
             async def chat(text, session=None):
@@ -32,8 +56,9 @@ class NativeHandoffTest(unittest.TestCase):
             # A recreated Worker restores Claude projects before per-task directories.
             root.rmdir()
             fact = "[Task handoff receipt]\nMatrix event $actually-sent. No action is needed."
-            await append_handoff(session, root, fact)
-            await append_handoff(session, root, fact)
+            transcript = next((root.parent / ".claude" / "projects").glob("*/" + session + ".jsonl"))
+            await append_handoff(transcript, root, fact)
+            await append_handoff(transcript, root, fact)
             self.assertEqual(len(http.requests), 1)
             messages = get_session_messages(session, directory=str(root))
             self.assertEqual(sum(m.message.get("content") == fact for m in messages), 1)

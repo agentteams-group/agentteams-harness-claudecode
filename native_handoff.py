@@ -4,16 +4,26 @@ import json
 import subprocess
 from pathlib import Path
 
-from claude_agent_sdk import ClaudeSDKError, ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, ResultMessage, get_session_messages
+from claude_agent_sdk import ClaudeSDKError, ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, ResultMessage
 
 from runtime_observability import event as trace
 from turn import task_completion
 
 
-async def append_handoff(session, workspace, fact):
+async def append_handoff(transcript, workspace, fact):
+    session = transcript.stem
+
     def recorded():
-        return any(m.type == "user" and m.message.get("content") == fact
-                   for m in get_session_messages(session, directory=str(workspace)))
+        # The SDK conversation projection can omit tool branches. Verify the
+        # user's exact committed input against the submitting native transcript.
+        with transcript.open() as stream:
+            for line in stream:
+                row = json.loads(line)
+                if (row.get("sessionId") == session and row.get("type") == "user"
+                        and not row.get("isMeta") and not row.get("isSidechain")
+                        and (row.get("message") or {}).get("content") == fact):
+                    return True
+        return False
 
     if recorded():
         return
@@ -78,7 +88,7 @@ def flush_handoffs(projects, checked, actor, confirm, backup):
             for workspace, result in outgoing_receipts(path):
                 confirmed = confirm({"operation": "confirmed_handoffs", "result": result, "actor": actor})
                 for record in confirmed:
-                    asyncio.run(append_handoff(path.stem, workspace, record["fact"]))
+                    asyncio.run(append_handoff(path, workspace, record["fact"]))
                 if confirmed:
                     backup(path)
                 count = len(result.get("assignments", [])) + bool(result.get("notification"))
