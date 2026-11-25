@@ -22,4 +22,7 @@ if ! ensure_mc_credentials || ! agentteams_mc_host_configured; then
         "${AGENTTEAMS_FS_ACCESS_KEY:?}" "${AGENTTEAMS_FS_SECRET_KEY:?}" >/dev/null
 fi
 
+if [ -n "${AGENTTEAMS_STORAGE_PREFIX:-}" ]; then
+    python3 /opt/agentteams/scripts/lib/harness_health.py --runtime claudecode --member "${AGENTTEAMS_WORKER_NAME}" --parent "$$" &
+fi
 exec python3 /opt/agentteams/claude-code/bridge.py

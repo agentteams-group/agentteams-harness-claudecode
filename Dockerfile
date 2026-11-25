@@ -23,4 +23,8 @@ COPY *.py entrypoint.sh /opt/agentteams/claude-code/
 ENV PYTHONPATH=/opt/agentteams/scripts/lib:/opt/agentteams/transport \
     AGENTTEAMS_PLUGIN_DIR=/opt/agentteams/plugins/teamharness \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+COPY health_adapter.py /opt/agentteams/health_adapter.py
+RUN printf '#!/bin/sh\nexec python3 /opt/agentteams/health_adapter.py "$@"\n' > /opt/agentteams/harness-health \
+    && chmod 0755 /opt/agentteams/harness-health
+
 ENTRYPOINT ["python3", "/opt/agentteams/scripts/lib/runtime_supervisor.py", "--runtime", "claudecode", "--", "bash", "/opt/agentteams/claude-code/entrypoint.sh"]
