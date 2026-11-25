@@ -83,6 +83,8 @@ def mcp_servers(record, bundle, provider, task):
     env = {k: v for k, v in os.environ.items() if k.startswith(("AGENTTEAMS_", "TEAMHARNESS_", "MC_"))}
     env.update(AGENTTEAMS_PLUGIN_DIR=str(bundle), AGENTTEAMS_AGENT_ROLE=role_of(record),
                AT_CLAUDE_TASK_CONTEXT=json.dumps(task, default=str))
+    if run_id := task.get("runId") or task.get("sourceEvent"):
+        env["AGENTTEAMS_RUN_ID"] = run_id
     carrier = {}
     propagate.inject(carrier)
     if carrier.get("traceparent"):
@@ -135,6 +137,8 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
           tempfile.TemporaryDirectory(prefix="at-claude-skills-") as directory):
         plugin = Path(directory)
         instructions = prepare_assets(record, bundle, plugin)
+        if task.get("planning"):
+            instructions += "\n规划时在 task plan 的 overview 中写明目标、要求、验收标准、节点分工和最终产物。保存后系统会先发布概要，再派单。"
         servers = mcp_servers(record, bundle, provider, task)
         refreshed = plugin / "refreshed.json"
         servers["teamharness"]["env"]["AT_CLAUDE_REFRESH_FILE"] = str(refreshed)

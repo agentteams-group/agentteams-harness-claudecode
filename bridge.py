@@ -127,7 +127,12 @@ def load_member(path):
 def admitted(raw, room, rooms, member, agents, transport, deny):
     own = member["matrixUserId"]
     sender, event_id = raw.get("sender"), raw.get("event_id")
-    if not sender or not event_id or raw.get("type") != "m.room.message" or raw.get("unsigned", {}).get("redacted_because"):
+    event_type = raw.get("type")
+    if not sender or not event_id or raw.get("unsigned", {}).get("redacted_because"):
+        return None
+    if event_type != "m.room.message" and not (
+        event_type == "org.agentteams.coordination" and "org.agentteams.coordination" in (raw.get("content") or {})
+    ):
         return None
     blocked = deny.get("dmDenyExtra" if rooms.get(room) == "personal" else "groupDenyExtra") or []
     denied = matrix_ids(blocked, own.split(":", 1)[1])
@@ -256,6 +261,9 @@ def execute_input(state, client, record, provider, event, agents, matrix, claim)
             slot.update(stage="refresh", attempts=0, updatedContext=update["contextUpdate"], refreshedInputs=update["refreshedInputs"])
             state.save()
             return True
+        receipt = task.get("_completed")
+        if receipt and phase and packet["kind"] in {"handoff", "task_submitted"} and not receipt.get("displayText"):
+            slot["silent_receipt"] = receipt["receiptId"]
         slot["answer"] = answer
         if workspace == state.workspace:
             slot["outputs"] = changed_outbox_files(workspace, before)
@@ -277,9 +285,16 @@ def execute_input(state, client, record, provider, event, agents, matrix, claim)
         return
     answer = slot.get("answer") or "This turn was interrupted. Verify any tool effects before sending a new request."
     require_unencrypted_room(client, room)
+    if slot.get("silent_receipt"):
+        if claim:
+            matrix.message_save_reply(claim["identity"], answer)
+            matrix.message_complete(claim["identity"])
+        slot.update(stage="completed", delivered=True)
+        state.save()
+        return
     if claim is None:
         reply_id = client.send_text(room, answer, eid, "claude-code:" + eid, reply_mention_user_ids(
-            event, answer, agents, record["member"]["matrixUserId"]), progress_only=bool(event.get("coordination_session")))
+            event, answer, agents, record["member"]["matrixUserId"]), progress_only=False, run_id=eid)
         if not reply_id.startswith("$"):
             raise RuntimeError("Matrix did not acknowledge the saved reply")
     else:

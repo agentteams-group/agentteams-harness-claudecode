@@ -193,6 +193,12 @@ class NativeRecovery(unittest.TestCase):
                 self.run_scan()
             self.recovery.prepare_reply.assert_called_once_with("child", "team", "answer")
             self.assertEqual(delivery.call_args.args[-1], "immutable business report")
+            interaction = self.go.await_args.kwargs["interaction"]
+            self.assertEqual(interaction.run, "claudecode:task:team:child:4")
+            self.assertEqual(self.go.await_args.args[5]["runId"], interaction.run)
+            with patch("task_worker.require_unencrypted_room"), patch("task_worker.publish_raw_saved", return_value="$sent") as publish:
+                self.adapter.deliver(self.client, self.recovery, self.rec, completed, "team", "immutable business report")
+            self.assertEqual(publish.call_args.kwargs["content"]["org.agentteams.run"]["run_id"], interaction.run)
 
     def test_own_running_tool_and_terminal_feedback_are_not_lost_execution(self):
         for status,state in (("in_progress","needs_verification"),("completed","released")):

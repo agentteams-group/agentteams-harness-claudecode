@@ -25,7 +25,7 @@ def scan(client, record, transport, rooms, agents, ready, admitted):
                 return "task_notification", packet["task_id"]
             return "message", None
 
-    receiver = RawWorkerSync(matrix, client, own, classify, observe)
+    receiver = RawWorkerSync(matrix, client, own, classify, observe, event_types=("m.room.message", "org.agentteams.coordination"))
     receiver.ready = ready
     snapshot, failures = receiver.poll(10000 if ready else 0)
     if failures:
@@ -60,5 +60,5 @@ def deliver_message(client, matrix, claim, event, own, answer):
         confirm_bound(saved["execution"], identity, "claudecode", checkpoint)
 
     reply = publish_raw_saved(client, event["room_id"], answer, claim["execution"]["checkpoint"],
-                              own, bind, content={"m.relates_to": {"m.in_reply_to": {"event_id": event["event_id"]}}})
+                              own, bind, content={"org.agentteams.run_id": event["event_id"], "m.relates_to": {"m.in_reply_to": {"event_id": event["event_id"]}}})
     return matrix.message_delivered(identity, reply)

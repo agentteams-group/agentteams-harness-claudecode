@@ -66,7 +66,12 @@ def serve(context):
             elif closed:
                 raise ValueError("This Task phase has ended")
             elif params.get("name") == "task":
-                outcome = task_native.invoke({"operation": "task", "arguments": params["arguments"], "context": context})
+                arguments = params["arguments"]
+                if arguments.get("action") == "plan" and context.get("planning") and not (
+                    isinstance(arguments.get("overview"), str) and arguments["overview"].strip()
+                ):
+                    raise ValueError("请填写规划 overview，说明任务目标、验收标准、分工及交付物。")
+                outcome = task_native.invoke({"operation": "task", "arguments": arguments, "context": context})
                 context.update(outcome.get("contextUpdate") or {})
                 if outcome.get("requiresInputCheckpoint"):
                     # This private file carries the verified bridge result across the stdio process boundary.
