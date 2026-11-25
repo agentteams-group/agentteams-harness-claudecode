@@ -30,6 +30,16 @@ class TaskCompletionTests(unittest.TestCase):
                     root,'Submit the prepared Task.',None,task,ROOT/'plugins/teamharness'))
                 projects = root / '.claude/projects'
                 path = next(projects.glob('*/' + session + '.jsonl'))
+                # Claude records the current shell cwd after a Bash cd, while the
+                # native session still belongs to its original project directory.
+                scratch = root / ".scratch"
+                scratch.mkdir(exist_ok=True)
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                for row in rows:
+                    blocks = (row.get("message") or {}).get("content")
+                    if isinstance(blocks, list) and any(b.get("type") == "tool_result" for b in blocks):
+                        row["cwd"] = str(scratch)
+                path.write_text("".join(json.dumps(row) + "\n" for row in rows))
                 items = list(outgoing_receipts(path))
                 self.assertEqual(len(items), 1)
                 self.assertEqual(items[0][0], root)

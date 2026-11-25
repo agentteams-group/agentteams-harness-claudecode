@@ -41,11 +41,16 @@ async def append_handoff(session, workspace, fact):
 
 def outgoing_receipts(path):
     calls = set()
+    workspace = None
     with path.open() as stream:
         for line in stream:
             row = json.loads(line)
             if row.get("sessionId") != path.stem:
                 continue
+            # Bash can change cwd mid-turn. The SDK indexes this transcript under
+            # the directory of the original session, including after a resume.
+            if workspace is None and row.get("type") in {"user", "assistant"} and row.get("cwd"):
+                workspace = Path(row["cwd"])
             blocks = (row.get("message") or {}).get("content")
             if not isinstance(blocks, list):
                 continue
@@ -58,8 +63,8 @@ def outgoing_receipts(path):
                     continue
                 content = block.get("content")
                 receipt = task_completion([{"text": content}] if isinstance(content, str) else content)
-                if receipt and receipt.get("pendingHandoffs"):
-                    yield Path(row["cwd"]), receipt["pendingHandoffs"]
+                if workspace is not None and receipt and receipt.get("pendingHandoffs"):
+                    yield workspace, receipt["pendingHandoffs"]
 
 
 def flush_handoffs(projects, checked, actor, confirm, backup):
