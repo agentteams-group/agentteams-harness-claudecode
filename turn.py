@@ -23,6 +23,10 @@ from agentteams_skill_warnings import check_skill, report_warnings
 from interaction import TurnStopped
 
 
+class UnverifiedToolEffect(RuntimeError):
+    """The Task journal needs evidence before the model can continue."""
+
+
 def role_of(record):
     role = record["member"]["role"]
     role = {"standalone": "worker", "team_leader": "leader", "remote": "remote-member"}.get(role, role)
@@ -137,6 +141,8 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
           tempfile.TemporaryDirectory(prefix="at-claude-skills-") as directory):
         plugin = Path(directory)
         instructions = prepare_assets(record, bundle, plugin)
+        if task.get("execution"):
+            instructions += "\n读取和修改工作文件时使用 Read、Write 和 Edit。需要验证文件内容时可用已安装的 Python 3。使用其他命令行工具前先确认其可用性。"
         if task.get("planning"):
             instructions += "\n规划时在 task plan 的 overview 中写明目标、要求、验收标准、节点分工和最终产物。保存后系统会先发布概要，再派单。"
         servers = mcp_servers(record, bundle, provider, task)
@@ -215,7 +221,9 @@ async def run_turn(record, provider, workspace, prompt, session, task, bundle, *
                 if not success and name not in {"Read", "Glob", "Grep"}:
                     if interaction:
                         await interaction.tool(key, name, data.get("tool_input") or {}, "failed", data.get("error"))
-                    return {}  # Keep the registered mutation unresolved until authoritative verification.
+                    task["_unverified_tool"] = name
+                    await client.interrupt()
+                    return {"continue_": False, "stopReason": "Task tool effect requires verification"}
                 if name == "Bash" and (not isinstance(response, dict) or response.get("interrupted") is not False
                         or response.get("backgroundTaskId") or response.get("background_task_id")):
                     return {}  # No synchronous terminal evidence: retain admission for recovery.
@@ -344,6 +352,8 @@ async def receive(client, interaction, watcher, span, refreshed, prompt, task):
                     result_span.set_attribute("gen_ai.response.model", message.model)
                     result_span.set_attribute("gen_ai.response.id", getattr(message, "message_id", None) or "")
             if isinstance(message, ResultMessage):
+                if task.get("_unverified_tool"):
+                    raise UnverifiedToolEffect(f"{task['_unverified_tool']} 执行失败，需要核对操作结果后继续。")
                 completed = task.get("_completed")
                 if completed:
                     if not persisted_task_receipt(message.session_id, completed):
@@ -372,10 +382,11 @@ async def receive(client, interaction, watcher, span, refreshed, prompt, task):
         raise RuntimeError("Claude Code exited without a result")
     except TurnStopped:
         raise
-    except BaseException:
+    except BaseException as error:
         if interaction:
+            title = str(error) if isinstance(error, UnverifiedToolEffect) else "Claude execution failed"
             await interaction.status("failed")
-            await interaction.block("ending", {"type": "error", "kind": "failed", "title": "Claude execution failed"}, "Claude execution failed")
+            await interaction.block("ending", {"type": "error", "kind": "failed", "title": title}, title)
         raise
 
 

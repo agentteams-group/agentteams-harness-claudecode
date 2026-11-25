@@ -39,3 +39,26 @@ class TaskBashTests(unittest.TestCase):
             self.assertTrue(seen)
             self.assertIs(seen[0]["interrupted"],False)
             self.assertEqual(seen[0]["stdout"],"native-task-test")
+
+
+    def test_unverified_failed_command_stops_before_another_model_request(self):
+        with tempfile.TemporaryDirectory() as tmp, ThreadingHTTPServer(("127.0.0.1", 0), Wire) as http:
+            threading.Thread(target=http.serve_forever, daemon=True).start()
+            self.addCleanup(http.shutdown)
+            http.requests = []
+            http.tool_name = "Bash"
+            http.tool_input = {"command": "printf written > partial.txt && exit 1"}
+            root = Path(tmp)
+            recovery = Mock()
+            task = {"role": "worker", "execution": "child", "identity": {"task_id": "child", "team_id": "team"},
+                    "context": {"outputDirectory": str(root)}}
+            with patch.dict(os.environ, {"HOME": tmp, "CLAUDE_CONFIG_DIR": str(root / ".claude"),
+                    "AGENTTEAMS_YOLO": "1", "AGENTTEAMS_PLUGIN_DIR": str(ROOT / "plugins/teamharness")}, clear=True), \
+                    patch("turn.Recovery", return_value=recovery):
+                with self.assertRaisesRegex(RuntimeError, "需要核对"):
+                    asyncio.run(run_turn({"member": {"role": "worker", "matrixUserId": "@cc:at"}, "desired": {}},
+                        {"models": [{"id": "claude-sonnet-4-6"}], "baseUrl": f"http://127.0.0.1:{http.server_port}/route",
+                         "apiKey": "fixture-gateway"}, root, "Run the native check.", None, task, ROOT / "plugins/teamharness"))
+            self.assertEqual((root / "partial.txt").read_text(), "written")
+            recovery.finish_tools.assert_not_called()
+            self.assertEqual(sum("tool_result" in json.dumps(req["messages"]) for req in http.requests), 0)
