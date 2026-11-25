@@ -5,7 +5,7 @@ from worker_matrix_delivery import confirm_bound
 from worker_matrix_raw import RawWorkerSync, publish_raw_saved
 
 
-def scan(client, record, transport, rooms, agents, ready, admitted):
+def scan(client, record, transport, rooms, agents, ready, admitted, events):
     member = record["member"]
     own = member["matrixUserId"]
     matrix = WorkerMatrix("claudecode", device_delivery=True)
@@ -46,7 +46,13 @@ def scan(client, record, transport, rooms, agents, ready, admitted):
         elif row["intent"] == "message":
             claim = matrix.message_claim(matrix_event_key(room, row["event_id"]))
             if claim["recovery"] == "deliver":
-                deliver_message(client, matrix, claim, event, own, claim["saved_result"])
+                slot = events.get(event["event_id"]) or {}
+                if slot.get("silent_receipt"):
+                    if slot.get("answer") != claim["saved_result"]:
+                        raise RuntimeError("Saved coordination receipt differs from its native result")
+                    matrix.message_complete(claim["identity"])
+                else:
+                    deliver_message(client, matrix, claim, event, own, claim["saved_result"])
             elif claim["recovery"] == "resume":
                 pending.append((event, claim))
     return matrix, pending, assignments

@@ -331,9 +331,9 @@ def poll(state, ready):
         pending = next(iter(state.data.get("interaction_pending", {}).values()), {})
         event = {"event_id": pending.get("run_id", "restart"), "room_id": pending.get("room_id", ""), "sender": member["matrixUserId"]}
         asyncio.run(MatrixTurn(client, record, event, state.data, state.save).retire_previous())
-    worker = role_of(record) in {"worker", "remote-member"} and bool(os.getenv("AGENTTEAMS_CONTROLLER_URL"))
+    worker = role_of(record) != "manager" and bool(os.getenv("AGENTTEAMS_CONTROLLER_URL"))
     if worker:
-        matrix, pending, assignments = scan(client, record, transport, rooms, agents, ready, admitted)
+        matrix, pending, assignments = scan(client, record, transport, rooms, agents, ready, admitted, state.data["events"])
         recover_work(state, client, record, provider, assignments)
         if not ready:
             subprocess.run(["agt", "worker", "report-ready", "--name", os.getenv("AGENTTEAMS_WORKER_CR_NAME")
