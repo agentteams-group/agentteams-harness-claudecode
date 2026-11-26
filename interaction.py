@@ -21,7 +21,7 @@ class MatrixTurn:
         self.matrix, self.record, self.event = matrix, record, event
         self.data, self.save = data, save
         self.own = record["member"]["matrixUserId"]
-        self.room, self.run = event["room_id"], event["event_id"]
+        self.room, self.run = event["room_id"], event.get("run_id") or event["event_id"]
         self.context = uuid.uuid4().hex
         self.cursor = data.get("cursor")
         self.pending, self.messages, self.fragments = {}, {}, {}
@@ -36,7 +36,7 @@ class MatrixTurn:
         self.steers = {}
         self.session = None
         self.current = None
-        self.hidden = bool(event.get("coordination_session"))
+        self.hidden = (event.get("_task_protocol_meta") or {}).get("teamharness_coordination", {}).get("kind") == "assistant_digest"
         channel = record.get("desired", {}).get("channels", {}).get("matrix", {})
         self.tools_visible = not channel.get("filter_tool_messages", record.get("matrix", {}).get("transport", {}).get("filter_tool_messages", False))
         team = record.get("team") or {}

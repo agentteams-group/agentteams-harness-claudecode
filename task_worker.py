@@ -88,6 +88,10 @@ def verified_read_result(projects, workspace, checkpoint):
     return None
 
 
+def task_run_id(task, team):
+    return f"claudecode:task:{team}:{task['task_id']}:{task['execution']['generation']}"
+
+
 def deliver(client, recovery, record, task, team, answer):
     execution = task["execution"]
     room = task["room_id"]
@@ -97,10 +101,11 @@ def deliver(client, recovery, record, task, team, answer):
         saved = recovery.checkpoint(task["task_id"], team, checkpoint, expected_identity=execution)
         confirm_bound(saved["execution"], execution, "claudecode", checkpoint)
 
+    run_id = task_run_id(task, team)
     event = publish_raw_saved(client, room, answer, execution["checkpoint"], record["member"]["matrixUserId"],
                               bind, content={"org.agentteams.progress_only": True,
-                    "org.agentteams.run_id": task.get("notify_event_id") or "task:" + task["task_id"] + ":" + str(execution["generation"]),
-                    "org.agentteams.run": {"version": "1", "run_id": task.get("notify_event_id") or "task:" + task["task_id"] + ":" + str(execution["generation"]),
+                    "org.agentteams.run_id": run_id,
+                    "org.agentteams.run": {"version": "1", "run_id": run_id,
                         "blocks": [{"type": "text", "text": answer}]}})
     return recovery.delivered(task["task_id"], team, event)
 
@@ -180,7 +185,7 @@ def recover_work(state, client, record, provider, assignments):
                 source_id = registered_native.removeprefix("matrix:")
         context.update(role="worker", actor=record["member"]["matrixUserId"], identity=identity, room=task["room_id"], team=team,
                        coordination=(source.get("_task_protocol_meta") or {}).get("teamharness_coordination") or packet,
-                       sourceEvent=source_id, carrier=source.get("carrier") or {})
+                       sourceEvent=source_id, runId=task_run_id(task, team), carrier=source.get("carrier") or {})
 
         require_unencrypted_room(client, task["room_id"])
         directory = Path(context["context"]["outputDirectory"])
@@ -213,10 +218,9 @@ def recover_work(state, client, record, provider, assignments):
             return True
 
         admin = ((record.get("team") or {}).get("admin") or {}).get("matrixUserId")
-        task["notify_event_id"] = source_id or f"task:{task_id}:{execution['generation']}"
         event = {"event_id": source_id or f"task:{task_id}:{execution['generation']}", "room_id": task["room_id"],
                  "sender": source.get("sender") or admin or record["member"]["matrixUserId"],
-                 "coordination_session": task_id}
+                 "coordination_session": task_id, "run_id": context["runId"]}
         interaction = MatrixTurn(client, record, event, state.data, state.save)
         def current():
             saved = recovery.current(task_id, team)
@@ -234,6 +238,9 @@ def recover_work(state, client, record, provider, assignments):
                 Path(os.environ["AGENTTEAMS_PLUGIN_DIR"]), on_checkpoint=remember_checkpoint, interaction=interaction))
         except TurnStopped:
             continue  # Cancellation is authoritative; never submit a synthetic completion.
+        if (context.get("_completed") or {}).get("pendingHandoffs"):
+            # The authenticated tool result in this transcript is the durable pending record.
+            state.backup_transcript(next(state.projects.glob("*/" + ref + ".jsonl")))
         saved = recovery.current(task_id, team)
         if not saved or saved["status"] == "cancelled":
             continue

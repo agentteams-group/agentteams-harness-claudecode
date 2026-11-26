@@ -5,7 +5,7 @@ from worker_matrix_delivery import confirm_bound
 from worker_matrix_raw import RawWorkerSync, publish_raw_saved
 
 
-def scan(client, record, transport, rooms, agents, ready, admitted):
+def scan(client, record, transport, rooms, agents, ready, admitted, events):
     member = record["member"]
     own = member["matrixUserId"]
     matrix = WorkerMatrix("claudecode", device_delivery=True)
@@ -25,7 +25,7 @@ def scan(client, record, transport, rooms, agents, ready, admitted):
                 return "task_notification", packet["task_id"]
             return "message", None
 
-    receiver = RawWorkerSync(matrix, client, own, classify, observe)
+    receiver = RawWorkerSync(matrix, client, own, classify, observe, event_types=("m.room.message", "org.agentteams.coordination"))
     receiver.ready = ready
     snapshot, failures = receiver.poll(10000 if ready else 0)
     if failures:
@@ -46,7 +46,13 @@ def scan(client, record, transport, rooms, agents, ready, admitted):
         elif row["intent"] == "message":
             claim = matrix.message_claim(matrix_event_key(room, row["event_id"]))
             if claim["recovery"] == "deliver":
-                deliver_message(client, matrix, claim, event, own, claim["saved_result"])
+                slot = events.get(event["event_id"]) or {}
+                if slot.get("silent_receipt"):
+                    if slot.get("answer") != claim["saved_result"]:
+                        raise RuntimeError("Saved coordination receipt differs from its native result")
+                    matrix.message_complete(claim["identity"])
+                else:
+                    deliver_message(client, matrix, claim, event, own, claim["saved_result"])
             elif claim["recovery"] == "resume":
                 pending.append((event, claim))
     return matrix, pending, assignments
@@ -60,5 +66,5 @@ def deliver_message(client, matrix, claim, event, own, answer):
         confirm_bound(saved["execution"], identity, "claudecode", checkpoint)
 
     reply = publish_raw_saved(client, event["room_id"], answer, claim["execution"]["checkpoint"],
-                              own, bind, content={"m.relates_to": {"m.in_reply_to": {"event_id": event["event_id"]}}})
+                              own, bind, content={"org.agentteams.run_id": event["event_id"], "m.relates_to": {"m.in_reply_to": {"event_id": event["event_id"]}}})
     return matrix.message_delivered(identity, reply)

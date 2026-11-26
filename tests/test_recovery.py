@@ -103,6 +103,47 @@ class WorkerRegression(unittest.TestCase):
                 with self.subTest(tool=name, path=path):
                     self.assertEqual(turn.file_allowed(name, {"file_path": str(path)}, out, (), context), expected)
 
+    def test_team_leader_uses_durable_worker_inbox_after_a_runtime_switch(self):
+        state = Mock()
+        state.data = {"cursor": None, "events": {}}
+        record = {"member": {"role": "team_leader", "matrixUserId": "@lead:test"}}
+        transport = {"homeserver": "local", "accessToken": "test"}
+        event = {"event_id": "$new"}
+        claim = {"identity": {"event_key": "new"}}
+        matrix = Mock()
+        with patch.dict(os.environ, AGENTTEAMS_CONTROLLER_URL="local"), \
+             patch("bridge.load_member", return_value=(record, transport, {})), \
+             patch("bridge.MatrixClient") as client, \
+             patch("bridge.scan", return_value=(matrix, [(event, claim)], {})) as scan, \
+             patch("bridge.recover_work"), patch("bridge.execute") as execute:
+            bridge.poll(state, True)
+            scan.assert_called_once()
+            client.return_value.sync.assert_not_called()
+            self.assertIs(execute.call_args.kwargs["matrix"], matrix)
+            self.assertIs(execute.call_args.kwargs["claim"], claim)
+
+    def test_restart_after_saving_a_quiet_receipt_does_not_publish_it(self):
+        import worker_sync
+        event = {"event_id": "$plan", "room_id": "!r"}
+        claim = {"identity": {"event_key": "key"}, "recovery": "deliver", "saved_result": "receipt fact"}
+        row = {**event, "intent": "message", "input": {}}
+        member = {"member": {"matrixUserId": "@lead:test"}, "desired": {}}
+        with patch("worker_sync.WorkerMatrix") as worker, patch("worker_sync.RawWorkerSync") as receiver, \
+             patch("worker_sync.managed_rooms", return_value={"!r"}), patch("worker_sync.deliver_message") as deliver:
+            matrix = worker.return_value
+            matrix.pending.return_value = [row]
+            matrix.message_claim.return_value = claim
+            def poll(_):
+                receiver.call_args.args[4]({})
+                return {"state": {"rooms": {}}}, {}
+            receiver.return_value.poll.side_effect = poll
+            args = (Mock(), member, {}, {}, set(), True, Mock(return_value=event))
+            worker_sync.scan(*args, {"$plan": {"silent_receipt": "verified", "answer": "receipt fact"}})
+            matrix.message_complete.assert_called_once_with(claim["identity"])
+            deliver.assert_not_called()
+            worker_sync.scan(*args, {})
+            deliver.assert_called_once()
+
     def test_empty_sync_discovers_work_even_on_restart(self):
         state, client = Mock(), Mock()
         state.registered_start = False
@@ -193,6 +234,12 @@ class NativeRecovery(unittest.TestCase):
                 self.run_scan()
             self.recovery.prepare_reply.assert_called_once_with("child", "team", "answer")
             self.assertEqual(delivery.call_args.args[-1], "immutable business report")
+            interaction = self.go.await_args.kwargs["interaction"]
+            self.assertEqual(interaction.run, "claudecode:task:team:child:4")
+            self.assertEqual(self.go.await_args.args[5]["runId"], interaction.run)
+            with patch("task_worker.require_unencrypted_room"), patch("task_worker.publish_raw_saved", return_value="$sent") as publish:
+                self.adapter.deliver(self.client, self.recovery, self.rec, completed, "team", "immutable business report")
+            self.assertEqual(publish.call_args.kwargs["content"]["org.agentteams.run"]["run_id"], interaction.run)
 
     def test_own_running_tool_and_terminal_feedback_are_not_lost_execution(self):
         for status,state in (("in_progress","needs_verification"),("completed","released")):

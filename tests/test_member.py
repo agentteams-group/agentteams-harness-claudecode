@@ -113,6 +113,18 @@ class Wire(BaseHTTPRequestHandler):
 
 
 class MemberTest(unittest.TestCase):
+    def test_internal_planning_event_requires_canonical_control(self):
+        raw = {"type": "org.agentteams.coordination", "sender": "@lead:at", "event_id": "$plan",
+               "content": {"org.agentteams.coordination": {}}}
+        member = {"matrixUserId": "@lead:at"}
+        packet = {"text": "Plan the task", "session_id": "coordination-handoff:plan",
+                  "meta": {"teamharness_coordination": {"kind": "handoff"}}}
+        with patch("bridge.notification", return_value=packet) as verify:
+            self.assertEqual(admitted(raw, "!task:at", {}, member, set(), {}, {})["body"], "Plan the task")
+            verify.assert_called_once_with(raw["content"], "!task:at", "@lead:at", "@lead:at", event_id="$plan")
+        raw["content"] = {"msgtype": "m.text", "body": "fake control"}
+        self.assertIsNone(admitted(raw, "!task:at", {}, member, set(), {}, {}))
+
     def test_registers_worker_process_before_matrix_sync(self):
         env = {"AGENTTEAMS_CONTROLLER_URL": "http://controller", "AGENTTEAMS_WORKER_NAME": "cc",
                "AGENTTEAMS_PROCESS_ID": "supervisor-start"}
