@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: agentscope-ai/AgentTeams
-          ref: 7838b07ad665c8ded76207f1bef05db650a151df
+          ref: 5f09b48fab057361e153233501cd6dd1d009dee7
           path: core
       - name: Check out the pinned Matrix transport
         run: git -C core submodule update --init deepseek-harness
