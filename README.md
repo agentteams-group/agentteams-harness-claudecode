@@ -13,7 +13,7 @@ The default `AGENTTEAMS_CLAUDE_UPSTREAM_API=anthropic` uses the saved gateway's 
 Check out AgentTeams beside this repository. Use the Core revision below for the shared libraries, role assets and `agt`. Build the Controller image from the same Core revision and set `CONTROLLER_IMAGE` to its image reference.
 
 ```sh
-git -C ../AgentTeams checkout b37da7070f610640a84b2061a951c3e4ac690ecb
+git -C ../AgentTeams checkout 7838b07ad665c8ded76207f1bef05db650a151df
 git -C ../AgentTeams submodule update --init deepseek-harness
 docker buildx build --load --build-context agentteams=../AgentTeams \
   --build-arg AGENTTEAMS_CONTROLLER_IMAGE="$CONTROLLER_IMAGE" \
