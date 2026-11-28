@@ -108,7 +108,7 @@ class WorkerRegression(unittest.TestCase):
             client.send_text.assert_called_once()
             self.assertTrue(state.data["events"]["$input"]["delivered"])
 
-    def test_sdk_control_timeout_retries_the_same_poll_with_a_bound(self):
+    def test_sdk_control_timeout_keeps_the_process_and_recovers_with_bounded_backoff(self):
         # The pinned SDK wraps TimeoutError during its initialize request.
         try:
             try:
@@ -117,19 +117,19 @@ class WorkerRegression(unittest.TestCase):
                 raise Exception("Control request timeout: initialize") from cause
         except Exception as error:
             timeout = error
-        with patch.dict(os.environ, TEAMHARNESS_RUNTIME_CONFIG="/fixture"), \
-             patch("bridge.MemberState") as state, patch("bridge.trace"), patch("bridge.time.sleep") as wait, \
-             patch("bridge.poll", side_effect=timeout) as poll:
-            with self.assertRaisesRegex(Exception, "Control request timeout"):
-                bridge.main()
-            self.assertEqual(poll.call_count, 3)
-            self.assertTrue(all(call.args == (state.return_value, False) for call in poll.call_args_list))
-            self.assertEqual(wait.call_count, 2)
-            poll.reset_mock()
-            poll.side_effect = Exception("unrelated SDK error")
-            with self.assertRaisesRegex(Exception, "unrelated SDK error"):
-                bridge.main()
-            self.assertEqual(poll.call_count, 1)
+        for failure in (timeout, Exception("unrelated SDK error")):
+            with self.subTest(error=str(failure)), \
+                 patch.dict(os.environ, TEAMHARNESS_RUNTIME_CONFIG="/fixture"), \
+                 patch("telemetry.configure"), patch("bridge.MemberState") as state, \
+                 patch("bridge.trace"), patch("bridge.time.sleep") as wait, \
+                 patch("bridge.poll", side_effect=[failure] * 4 + [None, KeyboardInterrupt()]) as poll:
+                with self.assertRaises(KeyboardInterrupt):
+                    bridge.main()
+                self.assertEqual(poll.call_count, 6)
+                self.assertTrue(all(call.args == (state.return_value, False) for call in poll.call_args_list[:5]))
+                self.assertEqual(poll.call_args.args, (state.return_value, True))
+                self.assertEqual(wait.call_count, 4)
+                self.assertTrue(all(0 <= call.args[0] <= 30 for call in wait.call_args_list))
 
     def test_only_current_prepared_inputs_are_readable(self):
         with tempfile.TemporaryDirectory() as tmp:
