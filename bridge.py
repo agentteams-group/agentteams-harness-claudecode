@@ -19,14 +19,16 @@ from runtime_observability import event as trace
 from task_coordination import notification, IgnoredNotification
 from worker_matrix_raw import require_unencrypted_room
 from worker_matrix_state import WorkerMatrix
+from worker_sessions import WorkerSessions
 from worker_runtime_config import project
 
 from turn import role_of, run_turn
-from task_worker import native, recover_work
+from task_worker import native, recover_work, remember_checkpoint, transcript_digest
 from native_handoff import flush_handoffs
 from worker_handoff import recovery_scanned
 from worker_sync import scan, deliver_message
 from interaction import MatrixTurn, TurnStopped
+from agentteams_receipts import Receipts
 
 
 def mc(*args):
@@ -189,6 +191,9 @@ def execute(state, client, record, provider, event, agents, *, matrix=None, clai
 def execute_input(state, client, record, provider, event, agents, matrix, claim):
     events = state.data["events"]
     eid, room = event["event_id"], event["room_id"]
+    manager_receipts = Receipts(state.workspace.parent) if role_of(record) == "manager" else None
+    if manager_receipts and manager_receipts.was_completed(room, eid):
+        return
     slot = events.get(eid)
     if slot and (slot.get("stage") == "failed" or (slot.get("delivered") and not claim)):
         return
@@ -199,7 +204,11 @@ def execute_input(state, client, record, provider, event, agents, matrix, claim)
     phase = packet.get("kind") in {"handoff", "task_submitted", "main_task_ready"}
     if slot is None:
         slot = events[eid] = {"stage": "prepare"}
-    if slot.get("stage") == "inference" and slot.get("replayable") and not phase:
+    resuming = bool(claim and not phase and (slot.get("stage") == "inference"
+        or ((claim.get("execution") or {}).get("checkpoint") or {}).get("completed_steps")))
+    if resuming:
+        claim = matrix.message_current(claim["identity"])
+    if slot.get("stage") == "inference" and (slot.get("replayable") or resuming) and not phase:
         slot["stage"] = "refresh" if slot.get("refreshedInputs") else "prepare"
     if slot.get("stage") in {"prepare", "refresh"}:
         if slot.get("attempts", 0) >= 3:
@@ -243,10 +252,23 @@ def execute_input(state, client, record, provider, event, agents, matrix, claim)
                 slot["replayable"] = False
                 state.save()
 
+        session = state.data["sessions"].get(scope)
+        cache_checkpoint = None
+        if claim and not phase:
+            sessions = WorkerSessions("claudecode", recovery=matrix.recovery)
+            work = {"kind": "message", "event_key": claim["identity"]["event_key"]}
+            if resuming:
+                view = sessions.load(work)
+                ref = (view.get("cache") or {}).get("native_ref")
+                session = ref if sessions.usable(view, ref, transcript_digest(state.projects, ref)) else None
+                prompt = claim.get("resume_text", "") + "\n" + prompt
+            def cache_checkpoint(native_ref, call_id, saved_execution):
+                return remember_checkpoint(state, sessions, work, matrix.recovery, native_ref, call_id, saved_execution)
         try:
             session, answer = asyncio.run(run_turn(record, provider, workspace, prompt,
-                state.data["sessions"].get(scope), task, Path(os.environ["AGENTTEAMS_PLUGIN_DIR"]), on_effect=before_effect,
-                interaction=MatrixTurn(client, record, event, state.data, state.save)))
+                session, task, Path(os.environ["AGENTTEAMS_PLUGIN_DIR"]), on_effect=before_effect, on_checkpoint=cache_checkpoint,
+                interaction=MatrixTurn(client, record, event, state.data, state.save),
+                **({'message_identity': claim['identity']} if claim else {})))
         except TurnStopped as stopped:
             if claim:
                 matrix.message_cancel(claim["identity"])
@@ -321,6 +343,9 @@ def execute_input(state, client, record, provider, event, agents, matrix, claim)
         if frame["eventId"] != eid:
             events[frame["eventId"]] = {"delivered": True, "inferenceEvent": eid}
     state.save()
+    if manager_receipts:
+        manager_receipts.enqueue(room, eid, "completed")
+        manager_receipts.flush(client.request)
 
 
 def poll(state, ready):
@@ -399,9 +424,9 @@ def main():
         except Exception as error:
             failures += 1
             trace("matrix.failed", error_type=type(error).__name__, error=str(error)[:1024])
-            delay = retry_delay(error, failures)
-            if delay is None or failures >= 3:
-                raise
+            delay = retry_delay(error, min(failures, 5))
+            delay = min(30, delay) if delay is not None else 30
+            trace("matrix.retry_scheduled", attempt=failures, retry_in_seconds=delay)
             time.sleep(delay)
 
 

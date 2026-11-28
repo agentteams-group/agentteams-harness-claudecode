@@ -17,7 +17,42 @@ import yaml
 HARNESS = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("AGENTTEAMS_CORE_DIR", HARNESS.parent))
 sys.path[:0] = [str(HARNESS), str(ROOT / "deepseek-harness/scripts"), str(ROOT / "shared/lib")]
-from bridge import MemberState, admitted, load_member, poll, retry_delay
+from bridge import MemberState, admitted, load_member, poll, retry_delay, execute_input
+from agentteams_receipts import Receipts
+
+
+class RuntimeLoopTests(unittest.TestCase):
+    def test_poll_failures_do_not_exit_and_a_later_success_is_accepted(self):
+        import bridge
+        for failure in (OSError("temporary disconnect"), HTTPError("http://fixture", 403, "credentials changed", {}, None)):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch("bridge.MemberState", return_value=Mock()) as state, \
+                    patch("telemetry.configure"), \
+                    patch("bridge.trace"), \
+                    patch("bridge.time.sleep") as sleep, \
+                    patch("bridge.poll", side_effect=[failure] * 4 + [None, KeyboardInterrupt()]) as poll, \
+                    patch.dict(os.environ, {"TEAMHARNESS_RUNTIME_CONFIG": "/fixture/runtime.yaml"}):
+                with self.assertRaises(KeyboardInterrupt):
+                    bridge.main()
+                self.assertEqual(poll.call_count, 6)
+                self.assertTrue(poll.call_args_list[-1].args[1], "successful scan must restore readiness")
+                self.assertEqual(sleep.call_count, 4)
+                self.assertTrue(all(0 <= call.args[0] <= 30 for call in sleep.call_args_list))
+
+
+class ManagerReplayTests(unittest.TestCase):
+    def test_completed_input_from_another_harness_never_starts_inference(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipts = Receipts(root)
+            receipts.enqueue('!private:test', '$already-done', 'completed')
+            state = Mock(workspace=root / 'workspace', data={'events': {}})
+            record = {'member': {'role': 'manager'}}
+            event = {'event_id': '$already-done', 'room_id': '!private:test'}
+            with patch('bridge.run_turn') as turn, patch('bridge.subprocess.run') as prepare:
+                self.assertIsNone(execute_input(state, Mock(), record, {}, event, set(), None, None))
+            turn.assert_not_called()
+            prepare.assert_not_called()
 
 
 def message(text, event_id, sender="@human:at"):
@@ -72,6 +107,9 @@ class Wire(BaseHTTPRequestHandler):
             return
         request = json.load(self.rfile_body())
         self.server.requests.append(request)
+        if getattr(self.server, "fail_after", None) and len(self.server.requests) > self.server.fail_after:
+            self.reply({"type":"error", "error":{"type":"invalid_request_error", "message":"Fixture model failure"}},400)
+            return
         history = json.dumps(request["messages"])
         resume = "second-turn" in history
         first = not resume and "tool_result" not in history
@@ -81,7 +119,13 @@ class Wire(BaseHTTPRequestHandler):
                  "model": model, "content": [], "stop_reason": None, "usage": usage}
         tool_name = getattr(self.server, "tool_name", "mcp__teamharness__health")
         tool_input = getattr(self.server, "tool_input", {})
-        block = {"type": "tool_use", "id": "toolu_local", "name": tool_name, "input": {}} if first else {
+        sequence = getattr(self.server, "tool_sequence", None)
+        if sequence:
+            first = len(self.server.requests) <= len(sequence)
+            if first:
+                tool_name = sequence[len(self.server.requests) - 1]
+        call_id = 'toolu_' + str(len(self.server.requests)) if sequence else 'toolu_local'
+        block = {"type": "tool_use", "id": call_id, "name": tool_name, "input": {}} if first else {
             "type": "text", "text": ""}
         delta = {"type": "input_json_delta", "partial_json": json.dumps(tool_input)} if first else {
             "type": "text_delta", "text": "second-ok" if resume else "first-ok"}

@@ -1,6 +1,8 @@
 """Attach confirmed Matrix handoffs to the submitting Claude Code session."""
 import asyncio
 import json
+import os
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -98,3 +100,36 @@ def flush_handoffs(projects, checked, actor, confirm, backup):
         except (OSError, ValueError, RuntimeError, ClaudeSDKError, subprocess.SubprocessError) as error:
             # A partial transcript or a temporarily unavailable receipt can be retried independently.
             trace("task.handoff.deferred", session_id=path.stem, error=str(error)[:256])
+
+
+def commit_supplement(session, native_id, event_id, item):
+    """Prove the SDK input row before retiring Core's ordinary pending input."""
+    from worker_matrix_state import WorkerMatrix, matrix_event_key
+    from runtime_control import retire_native_supplement
+    projects = Path(os.getenv('CLAUDE_CONFIG_DIR') or Path.home() / '.claude') / 'projects'
+    expected = f"[AgentTeams supplementary input {event_id}]\n{item['body']}"
+    for path in projects.glob('*/' + session + '.jsonl'):
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            if row.get('sessionId') != session or row.get('isSidechain') or row.get('isMeta'):
+                continue
+            attachment = row.get('attachment') or {}
+            if row.get('type') == 'user' and row.get('uuid') == native_id:
+                content = (row.get('message') or {}).get('content')
+            elif (row.get('type') == 'attachment' and attachment.get('type') == 'queued_command'
+                  and attachment.get('source_uuid') == native_id and attachment.get('commandMode') == 'prompt'):
+                # An input received during a tool call is persisted as a queued command.
+                content = attachment.get('prompt')
+            else:
+                continue
+            if content != expected and content != [{'type': 'text', 'text': expected}]:
+                raise RuntimeError('Claude native supplementary input differs from the admitted source')
+            matrix = WorkerMatrix('claudecode')
+            key = matrix_event_key(item['room_id'], event_id)
+            snapshot = matrix.native_input(key)
+            digest = hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()
+            if not matrix.native_current(snapshot, session, digest):
+                matrix.native_committed(key, snapshot, session, digest)
+            retire_native_supplement(matrix, key)
+            return
+    raise RuntimeError('Claude native transcript has not persisted the supplementary input')

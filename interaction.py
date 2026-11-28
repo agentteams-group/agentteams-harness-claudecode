@@ -8,6 +8,7 @@ import uuid
 from urllib.parse import quote
 
 from runtime_observability import redact
+from run_progress import progress_text, progress_value
 
 
 class TurnStopped(RuntimeError):
@@ -36,6 +37,9 @@ class MatrixTurn:
         self.steers = {}
         self.session = None
         self.current = None
+        self.task_identity = event.get("task_execution")
+        self.outcome = "failed"
+        self.terminal_sent = False
         self.hidden = (event.get("_task_protocol_meta") or {}).get("teamharness_coordination", {}).get("kind") == "assistant_digest"
         channel = record.get("desired", {}).get("channels", {}).get("matrix", {})
         self.tools_visible = not channel.get("filter_tool_messages", record.get("matrix", {}).get("transport", {}).get("filter_tool_messages", False))
@@ -55,7 +59,9 @@ class MatrixTurn:
         return result
 
     async def block(self, key, block, body):
-        content = {"body": redact(body)[:16000], "org.agentteams.run": {
+        if block.get("type") == "thinking":
+            block = {**block, "content": progress_text(block.get("content", ""))}
+        content = {"body": progress_text(body), "org.agentteams.run": {
             "version": "1", "run_id": self.run, "blocks": [block]}}
         original = self.messages.get(key)
         self.serial += 1
@@ -66,6 +72,8 @@ class MatrixTurn:
         self.messages.setdefault(key, result)
 
     async def status(self, status):
+        if status in {"completed", "failed"}:
+            self.outcome = status
         if self.direct:
             await self.send({"body": status, "com.agentteams.execution": {
                 "run_id": self.run, "status": status, "capabilities": ["stop", "steer"]}},
@@ -196,12 +204,22 @@ class MatrixTurn:
 
     async def handle(self, room, raw, native):
         eid, sender = raw.get("event_id"), raw.get("sender")
+        from runtime_control import task_supplement
+        content = raw.get("content") or {}
+        supplement = task_supplement(self.record, {**(self.task_identity or {}), "room_id": self.room}, {
+            "room_id": room, "event_id": eid, "sender": sender, "body": content.get("body"),
+            "mentions": (content.get("m.mentions") or {}).get("user_ids", []),
+            "answer": content.get("com.agentteams.answer"), "execution_control": content.get("com.agentteams.control"),
+        })
         if (room != self.room or raw.get("type") != "m.room.message" or not eid or eid in self.seen
-                or sender not in self.humans or raw.get("unsigned", {}).get("redacted_because")):
+                or (sender not in self.humans and not supplement) or raw.get("unsigned", {}).get("redacted_because")):
             return
         content = raw.get("content") or {}
         answer, control = content.get("com.agentteams.answer"), content.get("com.agentteams.control")
         body = content.get("body") or ""
+        task_input = supplement
+        if supplement:
+            control = {"action": "steer", "agent_id": self.own, "run_id": self.run}
         if answer is None and control is None and isinstance(body, str):
             verb, _, supplement = body.partition(" ")
             if verb == "/cancel" and not supplement:
@@ -230,7 +248,8 @@ class MatrixTurn:
                     return
                 await self.resolve(key, "answered", result)
         elif control is not None:
-            if (not self.direct or not isinstance(control, dict) or sender != self.event["sender"]
+            if ((not self.direct or sender != self.event["sender"]) and not supplement
+                    or not isinstance(control, dict)
                     or control.get("agent_id") != self.own or control.get("run_id") != self.run
                     or control.get("action") not in {"stop", "steer"}):
                 return
@@ -242,10 +261,21 @@ class MatrixTurn:
                 await native.interrupt()
             elif isinstance(body, str) and body.strip():
                 # Save the supplementary input before handing it to the native process.
+                if task_input:
+                    from worker_matrix_state import WorkerMatrix
+                    source = {key: raw[key] for key in ('sender', 'type', 'content')}
+                    source['origin_server_ts'] = raw.get('origin_server_ts', 0)
+                    from worker_matrix_state import matrix_event_key
+                    from runtime_control import admit_native_supplement
+                    matrix = WorkerMatrix('claudecode')
+                    await asyncio.to_thread(matrix.accept, room, eid, source, 'message')
+                    if not await asyncio.to_thread(admit_native_supplement, matrix, matrix_event_key(room, eid)):
+                        self.seen.add(eid)
+                        return
                 native_id = str(uuid.uuid5(uuid.NAMESPACE_URL, self.room + ":" + eid))
                 self.steers[eid] = native_id
                 self.data.setdefault("steers", {})[eid] = {"run_id": self.run, "body": body, "room_id": room,
-                    "sender": sender, "native_uuid": native_id, "status": "pending"}
+                    "sender": sender, "native_uuid": native_id, "status": "pending", "task_supplement": task_input}
                 self.save()
                 async def supplementary():
                     yield {"type": "user", "uuid": native_id, "message": {"role": "user",
@@ -292,6 +322,10 @@ class MatrixTurn:
             consumed.add(message.user_message_uuid)
         for eid, native_id in list(self.steers.items()):
             if native_id in consumed:
+                item = self.data['steers'][eid]
+                if item.get('task_supplement'):
+                    from native_handoff import commit_supplement
+                    commit_supplement(message.session_id, native_id, eid, item)
                 self.data["steers"][eid]["status"] = "consumed"
                 self.data["events"][eid] = {"delivered": True, "control": True}
                 self.steers.pop(eid)
@@ -300,7 +334,7 @@ class MatrixTurn:
 
     async def poll(self, native):
         batch = await asyncio.to_thread(self.matrix.sync, self.cursor, 1000)
-        await asyncio.to_thread(self.matrix.fill_timeline_gaps, batch, self.cursor, {self.room: "personal"})
+        await asyncio.to_thread(self.matrix.fill_timeline_gaps, batch, self.cursor, {self.room: "task" if self.task_identity else "personal"})
         for room, view in batch.get("rooms", {}).get("join", {}).items():
             for raw in view.get("timeline", {}).get("events", []):
                 await self.handle(room, raw, native)
@@ -328,12 +362,12 @@ class MatrixTurn:
         block = {**self.tools.get(key, {}), "type": "tool_call", "tool_name": name, "tool_call_id": f"{self.context}:{key}",
                  "status": status}
         if fields or "arguments" not in block:
-            block["arguments"] = json.loads(redact(json.dumps(fields, default=str)))
+            block["arguments"] = progress_value(fields)
         block.setdefault("started_at", int(time.time() * 1000))
         if status in {"succeeded", "failed"}:
             block["finished_at"] = int(time.time() * 1000)
         if result is not None:
-            block["result"] = redact(json.dumps(result, ensure_ascii=False, default=str))[:16000]
+            block["result"] = progress_value(result)
         self.tools[key] = block
         await self.block("tool:" + key, block, f"{name}: {status}")
 
@@ -352,8 +386,8 @@ class MatrixTurn:
                 block["content"] = (block["content"] + delta.get("thinking", ""))[-16000:]
                 last = block.get("_last", 0)
                 if time.monotonic() - last > 1:
-                    block["_last"] = time.monotonic()
                     await self.block(f"thinking:{self.segment}:{index}", {k: redact(v) if k == "content" else v for k, v in block.items() if not k.startswith("_")}, block["content"])
+                    block["_last"] = time.monotonic()
         elif kind == "content_block_stop" and index in self.fragments:
             block = self.fragments.pop(index)
             block.pop("_last", None)
@@ -363,7 +397,7 @@ class MatrixTurn:
     async def close(self, status, *, terminal=False):
         for key in list(self.pending):
             await self.resolve(key, status, False)
-        if not terminal:
+        if not terminal or self.terminal_sent:
             return
         for index, fragment in list(self.fragments.items()):
             fragment.pop("_last", None)
@@ -374,4 +408,7 @@ class MatrixTurn:
             for key, tool in list(self.tools.items()):
                 if tool["status"] in {"running", "pending"}:
                     await self.tool(key, tool["tool_name"], tool["arguments"], "failed", "Interrupted; any earlier effects require verification")
-            await self.block("ending", {"type": "error", "kind": "cancelled", "title": "Execution stopped"}, "Execution stopped")
+        kind = 'cancelled' if self.stopped else 'quiet' if self.outcome == 'completed' else 'failed'
+        title = {'cancelled': '已停止', 'quiet': '已处理', 'failed': '执行失败'}[kind]
+        await self.block('ending', {'type': 'error', 'kind': kind, 'title': title}, title)
+        self.terminal_sent = True

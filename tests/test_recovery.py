@@ -15,6 +15,52 @@ import turn
 
 
 class WorkerRegression(unittest.TestCase):
+    def test_completed_task_room_is_discovered_for_a_formal_followup(self):
+        import worker_sync
+        member = {"member": {"matrixUserId": "@worker:test"}, "desired": {}}
+        rooms = {}
+        raw = {"type": "m.room.message", "event_id": "$followup", "sender": "@human:test",
+               "content": {"msgtype": "m.text", "body": "@worker:test status?", "m.mentions": {"user_ids": ["@worker:test"]}}}
+        with patch("worker_sync.WorkerMatrix") as worker, patch("worker_sync.RawWorkerSync") as receiver, \
+                patch("worker_sync.managed_rooms", return_value={"!completed:test"}), \
+                patch("task_coordination.controller_json", return_value={"taskId": "closed", "status": "completed"}) as fetch:
+            worker.return_value.pending.return_value = []
+            def poll(_):
+                self.assertEqual(receiver.call_args.args[4]({}), {"!completed:test"})
+                self.assertEqual(receiver.call_args.args[3]("!completed:test", raw), ("message", None))
+                return {"state": {"rooms": {}}}, {}
+            receiver.return_value.poll.side_effect = poll
+            worker_sync.scan(Mock(), member, {"groupPolicy": "open"}, rooms, set(), True, bridge.admitted, {})
+            fetch.assert_called_once_with("tasks/room-context?roomId=%21completed%3Atest")
+
+    def test_retained_assignment_is_not_executed_as_an_ordinary_message(self):
+        import worker_sync
+        event = {"event_id": "$assignment", "room_id": "!r", "_task_protocol_meta": {
+            "teamharness_coordination": {"kind": "task_assigned", "task_id": "child"}}}
+        row = {"event_id": "$assignment", "room_id": "!r", "intent": "message", "work": {"kind": "message"}, "input": {}}
+        member = {"member": {"matrixUserId": "@worker:test"}, "desired": {}}
+        with patch("worker_sync.WorkerMatrix") as worker, patch("worker_sync.RawWorkerSync") as receiver, \
+                patch("task_coordination.controller_json", return_value={}):
+            matrix = worker.return_value
+            matrix.pending.return_value = [row]
+            matrix.message_claim.return_value = {"recovery": "resume", "identity": {"event_key": "old"},
+                                                 "execution": {"checkpoint": None}}
+            def poll(_):
+                receiver.call_args.args[4]({})
+                return {"state": {"rooms": {}}}, {}
+            receiver.return_value.poll.side_effect = poll
+            with patch("worker_sync.managed_rooms", return_value={"!r"}):
+                _, pending, assignments = worker_sync.scan(Mock(), member, {}, {}, set(), True, Mock(return_value=event), {})
+            self.assertEqual(pending, [])
+            self.assertEqual(assignments, {"child": event})
+            matrix.message_cancel.assert_called_once_with({"event_key": "old"})
+            matrix.message_claim.return_value["recovery"] = "verify"
+            matrix.message_cancel.reset_mock()
+            with patch("worker_sync.managed_rooms", return_value={"!r"}):
+                _, pending, _ = worker_sync.scan(Mock(), member, {}, {}, set(), True, Mock(return_value=event), {})
+            self.assertEqual(pending, [])
+            matrix.message_cancel.assert_not_called()
+
     def test_receipts_without_a_native_project_do_not_break_startup(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);config=root/"runtime.yaml"
@@ -62,7 +108,7 @@ class WorkerRegression(unittest.TestCase):
             client.send_text.assert_called_once()
             self.assertTrue(state.data["events"]["$input"]["delivered"])
 
-    def test_sdk_control_timeout_retries_the_same_poll_with_a_bound(self):
+    def test_sdk_control_timeout_keeps_the_process_and_recovers_with_bounded_backoff(self):
         # The pinned SDK wraps TimeoutError during its initialize request.
         try:
             try:
@@ -71,19 +117,19 @@ class WorkerRegression(unittest.TestCase):
                 raise Exception("Control request timeout: initialize") from cause
         except Exception as error:
             timeout = error
-        with patch.dict(os.environ, TEAMHARNESS_RUNTIME_CONFIG="/fixture"), \
-             patch("bridge.MemberState") as state, patch("bridge.trace"), patch("bridge.time.sleep") as wait, \
-             patch("bridge.poll", side_effect=timeout) as poll:
-            with self.assertRaisesRegex(Exception, "Control request timeout"):
-                bridge.main()
-            self.assertEqual(poll.call_count, 3)
-            self.assertTrue(all(call.args == (state.return_value, False) for call in poll.call_args_list))
-            self.assertEqual(wait.call_count, 2)
-            poll.reset_mock()
-            poll.side_effect = Exception("unrelated SDK error")
-            with self.assertRaisesRegex(Exception, "unrelated SDK error"):
-                bridge.main()
-            self.assertEqual(poll.call_count, 1)
+        for failure in (timeout, Exception("unrelated SDK error")):
+            with self.subTest(error=str(failure)), \
+                 patch.dict(os.environ, TEAMHARNESS_RUNTIME_CONFIG="/fixture"), \
+                 patch("telemetry.configure"), patch("bridge.MemberState") as state, \
+                 patch("bridge.trace"), patch("bridge.time.sleep") as wait, \
+                 patch("bridge.poll", side_effect=[failure] * 4 + [None, KeyboardInterrupt()]) as poll:
+                with self.assertRaises(KeyboardInterrupt):
+                    bridge.main()
+                self.assertEqual(poll.call_count, 6)
+                self.assertTrue(all(call.args == (state.return_value, False) for call in poll.call_args_list[:5]))
+                self.assertEqual(poll.call_args.args, (state.return_value, True))
+                self.assertEqual(wait.call_count, 4)
+                self.assertTrue(all(0 <= call.args[0] <= 30 for call in wait.call_args_list))
 
     def test_only_current_prepared_inputs_are_readable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,7 +175,8 @@ class WorkerRegression(unittest.TestCase):
         row = {**event, "intent": "message", "input": {}}
         member = {"member": {"matrixUserId": "@lead:test"}, "desired": {}}
         with patch("worker_sync.WorkerMatrix") as worker, patch("worker_sync.RawWorkerSync") as receiver, \
-             patch("worker_sync.managed_rooms", return_value={"!r"}), patch("worker_sync.deliver_message") as deliver:
+             patch("worker_sync.managed_rooms", return_value={"!r"}), patch("worker_sync.deliver_message") as deliver, \
+             patch("task_coordination.controller_json", return_value={}):
             matrix = worker.return_value
             matrix.pending.return_value = [row]
             matrix.message_claim.return_value = claim
@@ -235,7 +282,7 @@ class NativeRecovery(unittest.TestCase):
             self.recovery.prepare_reply.assert_called_once_with("child", "team", "answer")
             self.assertEqual(delivery.call_args.args[-1], "immutable business report")
             interaction = self.go.await_args.kwargs["interaction"]
-            self.assertEqual(interaction.run, "claudecode:task:team:child:4")
+            self.assertEqual(interaction.run, "task:team:child:4")
             self.assertEqual(self.go.await_args.args[5]["runId"], interaction.run)
             with patch("task_worker.require_unencrypted_room"), patch("task_worker.publish_raw_saved", return_value="$sent") as publish:
                 self.adapter.deliver(self.client, self.recovery, self.rec, completed, "team", "immutable business report")
@@ -307,3 +354,46 @@ class InterruptedRead(unittest.TestCase):
             for changes in ({"arguments_sha256": "other"}, {"id": "other"}, {"read_only": False}, {"name": "Write"}):
                 invalid = {"operation": {"state": "started", "evidence": json.dumps([{**call, **changes}])}}
                 self.assertIsNone(verified_read_result(projects, workspace, invalid))
+
+
+class OrdinaryConfirmedResumeTests(unittest.TestCase):
+    def test_confirmed_tools_resume_instead_of_publishing_an_interruption_fallback(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = Mock(workspace=root, projects=root/'projects')
+            state.data = {'events':{'$input':{'stage':'inference','replayable':False,'attempts':1}}, 'sessions':{}}
+            event = {'event_id':'$input','room_id':'!room:test','body':'Continue the Task'}
+            record = {'member':{'role':'worker','matrixUserId':'@worker:test'}}
+            claim = {'identity':{'event_key':'input','generation':1,'instance_id':'fixture','process_id':'fixture'},
+                     'execution':{'checkpoint':{'completed_steps':['tools:verified'],'operation':{'state':'verified'}}},
+                     'resume_text':'Authoritative checkpoint: previous write already completed.'}
+            matrix, client = Mock(), Mock()
+            matrix.message_current.return_value = claim
+            with patch.dict(os.environ, AGENTTEAMS_PLUGIN_DIR=temporary), \
+                    patch('bridge.require_unencrypted_room'), patch('bridge.deliver_message') as deliver, \
+                    patch('bridge.subprocess.run', return_value=SimpleNamespace(stdout=json.dumps({'context':{'outputDirectory':temporary}}))), \
+                    patch('bridge.native', return_value={'spec':'current Task spec'}), \
+                    patch('bridge.WorkerSessions', create=True) as sessions, \
+                    patch('bridge.run_turn', return_value=('native-session','Resumed successfully')) as run:
+                sessions.return_value.load.return_value = {'cache':None}
+                bridge.execute_input(state, client, record, {}, event, set(), matrix, claim)
+            run.assert_called_once()
+            self.assertIn('previous write already completed', run.call_args.args[3])
+            self.assertIsNone(run.call_args.args[4])
+            self.assertEqual(matrix.message_save_reply.call_args.args[1], 'Resumed successfully')
+            self.assertEqual(deliver.call_count,1)
+            self.assertNotIn('interrupted', state.data['events']['$input']['answer'])
+
+    def test_changed_or_unconfirmed_execution_cannot_resume_native_inference(self):
+        from task_recovery import RecoveryConflict
+        state=Mock(workspace=Path('/tmp/fixture'),data={'events':{'$input':{'stage':'inference','replayable':False}},'sessions':{}})
+        matrix=Mock()
+        matrix.message_current.side_effect=RecoveryConflict('unconfirmed tool operation')
+        event={'event_id':'$input','room_id':'!room:test','body':'continue'}
+        record={'member':{'role':'worker','matrixUserId':'@worker:test'}}
+        with patch('bridge.require_unencrypted_room'), patch('bridge.run_turn') as run:
+            with self.assertRaises(RecoveryConflict):
+                bridge.execute_input(state,Mock(),record,{},event,set(),matrix,{'identity':{'event_key':'input'}})
+        run.assert_not_called()
+        matrix.message_save_reply.assert_not_called()

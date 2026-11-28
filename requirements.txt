@@ -2,3 +2,8 @@ claude-agent-sdk==0.2.187
 PyYAML==6.0.3
 opentelemetry-sdk==1.45.2
 opentelemetry-exporter-otlp-proto-http==1.45.2
+litellm==1.111.0
+starlette==1.10.0
+uvicorn==0.54.0
+fastapi==0.165.0
+orjson==3.13.0

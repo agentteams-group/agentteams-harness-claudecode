@@ -2,14 +2,18 @@
 
 Integration repository for running Claude Code through the official Claude Agent SDK as an AgentTeams Harness.
 
-This experimental managed Harness runs Manager, Leader and Worker roles with the runtime ID `claudecode`. Each role uses the Python Claude Agent SDK and its bundled Claude Code CLI. A deployment needs an Anthropic Messages-compatible gateway route and unencrypted Matrix rooms. Real-session admission of this candidate is in progress.
+This experimental managed Harness runs Manager, Leader and Worker roles with the runtime ID `claudecode`. Each role uses the Python Claude Agent SDK and its bundled Claude Code CLI. A deployment needs a compatible gateway route and unencrypted Matrix rooms. Real-session admission of this candidate is in progress.
+
+## Model protocol
+
+The default `AGENTTEAMS_CLAUDE_UPSTREAM_API=anthropic` uses the saved gateway's Anthropic Messages endpoint directly. For a model served through the Responses API, set `AGENTTEAMS_CLAUDE_UPSTREAM_API=responses` in the Agent environment and restart it. The Harness starts a loopback-only Messages endpoint and uses the pinned LiteLLM conversion library for requests, streaming responses and tool results. Requests still use the saved gateway address and Consumer credential; the model cannot replace either through request fields. This mode rejects nonempty `stop_sequences` rather than falling back to Chat Completions. It does not change Core authorization, tool approval or Task state transitions.
 
 ## Build and test
 
 Check out AgentTeams beside this repository. Use the Core revision below for the shared libraries, role assets and `agt`. Build the Controller image from the same Core revision and set `CONTROLLER_IMAGE` to its image reference.
 
 ```sh
-git -C ../AgentTeams checkout f2d5424f09976b1c2703a1732c64d19c93fcff6b
+git -C ../AgentTeams checkout 6e093d3db3b2ed980ab54228e51c9d799425a905
 git -C ../AgentTeams submodule update --init deepseek-harness
 docker buildx build --load --build-context agentteams=../AgentTeams \
   --build-arg AGENTTEAMS_CONTROLLER_IMAGE="$CONTROLLER_IMAGE" \
@@ -61,7 +65,11 @@ See the [Core deployment guide](https://github.com/agentscope-ai/AgentTeams/blob
 
 With AgentTeams tracing enabled, count model attempts using `claude-code.model.request`. The Harness exports one child span per request recorded by the pinned Claude CLI, including HTTP retries and the fallback from streaming to a non-streaming request. It reads the current turn’s native journal after SDK teardown, including when the Harness times out. A resumed turn skips requests from earlier turns.
 
-`agentteams.model.request.id` identifies each attempt. A terminal assistant reply supplies `gen_ai.response.id`. An attempt without a terminal reply has error status. Its end time is the next observed request or the end of the turn, as identified by `agentteams.model.end_observation`. These times give an observation boundary for diagnosing a stall. The existing `claude-code.model.response` spans describe SDK response messages. Count a successful generation once by its response ID. Request spans contain metadata only.
+`agentteams.model.request.id` identifies each attempt. A terminal assistant reply supplies `gen_ai.response.id`. An attempt without a terminal reply has error status. Its end time is the next observed request or the end of the turn, as identified by `agentteams.model.end_observation`. These times give an observation boundary for diagnosing a stall. The existing `claude-code.model.response` spans describe SDK response messages. Count a successful generation once by its response ID.
+
+The global content switch defaults to on when tracing is enabled. It captures the turn prompt, native tool inputs/results, and each request's returned assistant content, including returned thinking blocks. Shared sanitization redacts credentials before export. Per-request input is reconstructed from the pinned CLI's native replay shapes, message blobs and hashed assistant blocks, including resumed-session prefixes and cache controls. Native replay omits the transient SDK billing/version header. Missing references are reported as `agentteams.model.input_unavailable`; the adapter never substitutes the turn prompt as the full model input. Setting `AGENTTEAMS_OTEL_CAPTURE_CONTENT=false` disables content capture without removing timing, identity, status or usage.
+
+API request timeouts remain owned by the native CLI (`API_TIMEOUT_MS`). The Matrix adapter keeps stop and steering controls responsive while waiting; it does not add a separate deadline based on the absence of SDK messages. The optional Responses converter uses LiteLLM's bundled pricing map by default, so its first request does not wait for a GitHub pricing-map refresh.
 
 ## References
 
