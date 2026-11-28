@@ -39,6 +39,56 @@ class NativeHandoffTest(unittest.TestCase):
                 asyncio.run(append_handoff(transcript, Path("/work"), fact))
                 client.assert_not_called()
 
+    def test_supplement_requires_exact_native_user_row_before_retiring_input(self):
+        from native_handoff import commit_supplement
+        session, native = str(uuid4()), str(uuid4())
+        item = {'room_id': '!task:test', 'body': 'additional requirement'}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': tmp}), \
+                patch('worker_matrix_state.WorkerMatrix') as matrix, \
+                patch('runtime_control.retire_native_supplement') as retire:
+            project = Path(tmp) / 'projects' / '-work'
+            project.mkdir(parents=True)
+            transcript = project / (session + '.jsonl')
+            row = {'uuid': native, 'sessionId': session, 'type': 'user',
+                   'message': {'role': 'user', 'content': '[AgentTeams supplementary input $extra]\nadditional requirement'}}
+            transcript.write_text(json.dumps(dict(row, uuid=str(uuid4()))) + '\n')
+            with self.assertRaisesRegex(RuntimeError, 'has not persisted'):
+                commit_supplement(session, native, '$extra', item)
+            retire.assert_not_called()
+            transcript.write_text(json.dumps(row) + '\n')
+            matrix.return_value.native_current.return_value = False
+            commit_supplement(session, native, '$extra', item)
+            matrix.return_value.native_committed.assert_called_once()
+            retire.assert_called_once()
+
+    def test_queued_supplement_requires_exact_session_uuid_and_prompt(self):
+        from native_handoff import commit_supplement
+        session, native = str(uuid4()), str(uuid4())
+        item = {'room_id': '!task:test', 'body': 'additional requirement'}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': tmp}), \
+                patch('worker_matrix_state.WorkerMatrix') as matrix, \
+                patch('runtime_control.retire_native_supplement') as retire:
+            project = Path(tmp) / 'projects' / '-work'
+            project.mkdir(parents=True)
+            transcript = project / (session + '.jsonl')
+            attachment = {'type': 'queued_command', 'source_uuid': native, 'commandMode': 'prompt',
+                          'prompt': '[AgentTeams supplementary input $extra]\nadditional requirement'}
+            row = {'uuid': str(uuid4()), 'sessionId': session, 'type': 'attachment',
+                   'isSidechain': False, 'attachment': attachment}
+            for invalid in (dict(row, sessionId=str(uuid4())), dict(row, isSidechain=True),
+                            dict(row, attachment=dict(attachment, source_uuid=str(uuid4()))),
+                            dict(row, attachment=dict(attachment, type='other')),
+                            dict(row, attachment=dict(attachment, prompt='different input'))):
+                transcript.write_text(json.dumps(invalid) + '\n')
+                with self.assertRaises(RuntimeError):
+                    commit_supplement(session, native, '$extra', item)
+                retire.assert_not_called()
+            transcript.write_text(json.dumps(row) + '\n')
+            matrix.return_value.native_current.return_value = False
+            commit_supplement(session, native, '$extra', item)
+            matrix.return_value.native_committed.assert_called_once()
+            retire.assert_called_once()
+
     def test_receipt_survives_resume_and_replay_has_no_model_call(self):
         async def conversation(root, endpoint):
             async def chat(text, session=None):

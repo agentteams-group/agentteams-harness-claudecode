@@ -1,10 +1,11 @@
 """Exercise the Matrix wire contract without a model or a live homeserver."""
 import asyncio
+import json
 import os
 from pathlib import Path
 import sys
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(os.environ.get("AGENTTEAMS_CORE_DIR", Path(__file__).resolve().parents[2]))
 sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(ROOT / "shared/lib")]
@@ -135,6 +136,34 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                          update["m.new_content"]["org.agentteams.run"]["blocks"][0]["tool_call_id"])
         self.assertTrue(update["org.agentteams.progress_only"])
 
+    async def test_slow_progress_send_does_not_republish_every_buffered_delta(self):
+        clock = [10.0]
+        async def slow_send(*args):
+            clock[0] += 20
+        self.turn.block = AsyncMock(side_effect=slow_send)
+        with patch("interaction.time.monotonic", side_effect=lambda: clock[0]):
+            await self.turn.stream({"type":"content_block_start","index":0,
+                "content_block":{"type":"thinking","thinking":""}})
+            for text in ["first", " second"]:
+                await self.turn.stream({"type":"content_block_delta","index":0,
+                    "delta":{"type":"thinking_delta","thinking":text}})
+            self.assertEqual(self.turn.block.await_count, 1)
+            await self.turn.stream({"type":"content_block_stop","index":0})
+        self.assertEqual(self.turn.block.await_count, 2)
+        self.assertEqual(self.turn.block.call_args.args[1]["content"], "first second")
+        self.assertFalse(self.turn.block.call_args.args[1]["isStreaming"])
+
+    async def test_large_tool_and_thinking_updates_fit_matrix_events(self):
+        fields = {"file_path": "report.md", "content": "文件正文😀" * 20000, "api_key": "private-key"}
+        await self.turn.tool("large-write", "Write", fields, "running")
+        await self.turn.tool("large-write", "Write", fields, "succeeded", {"content": "返回内容😀" * 20000})
+        await self.turn.block("thinking:large", {"type": "thinking", "content": "推理😀" * 20000}, "推理😀" * 20000)
+        await self.turn.block("thinking:large", {"type": "thinking", "content": "推理😀" * 20000}, "推理😀" * 20000)
+        for _, content, _ in self.sent:
+            self.assertLess(len(json.dumps(content).encode()), 65536)
+            self.assertNotIn("private-key", json.dumps(content))
+        self.assertEqual(fields["api_key"], "private-key")
+
     async def test_controls_use_native_interrupt_and_steer_and_check_run(self):
         self.turn.direct = True
         def control(action, run="$source"):
@@ -187,6 +216,37 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
                 await watcher
             except asyncio.CancelledError:
                 pass
+
+
+    async def test_successful_quiet_task_and_failure_both_close_progress_once(self):
+        await self.turn.status('completed')
+        await self.turn.close('expired', terminal=True)
+        endings = [content for _, content, _ in self.sent if content.get('org.agentteams.run', {}).get('blocks', [{}])[0].get('kind') == 'quiet']
+        self.assertEqual(len(endings), 1)
+        self.assertTrue(endings[0]['org.agentteams.progress_only'])
+        await self.turn.close('expired', terminal=True)
+        self.assertEqual(len(self.sent), 1)
+        failed = MatrixTurn(self.matrix, self.record, self.event, self.data, self.save)
+        await failed.close('expired', terminal=True)
+        self.assertEqual(self.sent[-1][1]['org.agentteams.run']['blocks'][0]['kind'], 'failed')
+
+    async def test_core_admitted_task_supplement_uses_existing_sdk_query(self):
+        from unittest.mock import patch
+        self.event['task_execution'] = {'task_id': 'child', 'team_id': 'alpha'}
+        turn = MatrixTurn(self.matrix, self.record, self.event, self.data, self.save)
+        with patch('runtime_control.task_supplement', return_value=True) as admission, \
+                patch('worker_matrix_state.WorkerMatrix') as durable:
+            order = []
+            durable.return_value.message_claim.side_effect = lambda key: (order.append('claim') or {'recovery': 'resume'})
+            self.native.query.side_effect = lambda *args, **kwargs: order.append('query')
+            await turn.handle('!dm:at', self.raw({'body': 'new requirement'}, '@agent:at'), self.native)
+        self.assertEqual(order, ['claim', 'query'])
+        durable.return_value.accept.assert_called_once()
+        self.assertEqual(admission.call_args.args[1]['task_id'], 'child')
+        self.assertEqual(admission.call_args.args[2]['sender'], '@agent:at')
+        self.native.query.assert_awaited_once()
+        self.native.interrupt.assert_not_awaited()
+        self.assertIn('$answer', turn.steers)
 
 
 if __name__ == "__main__":

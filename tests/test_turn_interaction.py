@@ -22,10 +22,37 @@ def result(text="done", **extra):
 
 
 class TurnInteractionTests(unittest.IsolatedAsyncioTestCase):
-    async def drive(self, stream, watch):
+    async def test_native_response_can_outlast_the_wrapper_idle_deadline(self):
+        async def stream(options, client, interaction):
+            yield SystemMessage(subtype="init", data={"session_id": "native-session"})
+            await asyncio.sleep(2.2)
+            client.interrupt.assert_not_awaited()
+            yield result()
+
+        async def watch(native, interaction):
+            await asyncio.Event().wait()
+
+        self.assertEqual(await self.drive(stream, watch), ("native-session", "done"))
+
+    async def test_native_transport_timeout_is_still_reported(self):
+        async def stream(options, client, interaction):
+            yield SystemMessage(subtype="init", data={"session_id": "native-session"})
+            raise TimeoutError("Native API request timed out")
+
+        async def watch(native, interaction):
+            await asyncio.Event().wait()
+
+        with self.assertRaisesRegex(TimeoutError, "Native API request timed out"):
+            await self.drive(stream, watch)
+
+    async def drive(self, stream, watch, approval_mode=None, mcp_mode=None):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             record = {"member": {"role": "worker", "matrixUserId": "@cc:at"}, "desired": {}}
+            if approval_mode:
+                record['desired']['approvalMode'] = approval_mode
+            if mcp_mode:
+                record['desired']['mcpServers'] = [{'name':'github', 'approvals':{'tools':'*','mode':mcp_mode}}]
             event = {"event_id": "$input", "sender": "@human:at", "room_id": "!room:at"}
             matrix = Mock()
             matrix.send_content.return_value = "$card"
@@ -40,10 +67,38 @@ class TurnInteractionTests(unittest.IsolatedAsyncioTestCase):
             client.receive_response.side_effect = lambda: stream(factory.call_args.kwargs["options"], client, interaction)
             interaction.watch = lambda native: watch(native, interaction)
             with patch("turn.ClaudeSDKClient", factory), patch("turn.prepare_assets", return_value="You are a Worker"), \
-                    patch("turn.mcp_servers", return_value={"teamharness": {"command": "unused", "env": {}}}), \
+                    patch("turn.mcp_servers", return_value={"teamharness": {"command": "unused", "env": {}}, **({'github':{}} if mcp_mode else {})}), \
                     patch.dict(os.environ, AGENTTEAMS_LLM_STREAM_TIMEOUT_S="2"):
                 return await run_turn(record, {"models": [{"id": "fixture"}], "baseUrl": "http://fixture", "apiKey": "fixture"},
                                       root, "Task", None, {}, root, interaction=interaction)
+
+    async def test_agent_approval_mode_selects_native_permission_mode(self):
+        for mode, expected in [('ask', 'deny'), ('allow', 'allow')]:
+            async def stream(options, client, interaction):
+                self.assertEqual(options.permission_mode, 'default')
+                self.assertNotIn('AskUserQuestion', options.allowed_tools)
+                self.assertTrue(options.hooks['PreToolUse'])
+                interaction.permission = AsyncMock(return_value=False)
+                permission = await options.can_use_tool('Bash', {'command':'printf OK'},
+                    ToolPermissionContext(tool_use_id='native-command'))
+                self.assertEqual(permission.behavior, expected)
+                self.assertEqual(interaction.permission.await_count, 1 if mode == 'ask' else 0)
+                yield result()
+            async def watch(native, interaction):
+                await asyncio.Event().wait()
+            await self.drive(stream, watch, approval_mode=mode)
+
+    async def test_agent_allow_preserves_explicit_mcp_approval_and_user_questions(self):
+        async def stream(options, client, interaction):
+            interaction.permission = AsyncMock(return_value=False)
+            for name in ('mcp__github__push_files', 'AskUserQuestion'):
+                permission = await options.can_use_tool(name, {}, ToolPermissionContext(tool_use_id=name))
+                self.assertEqual(permission.behavior, 'deny')
+            self.assertEqual(interaction.permission.await_count, 2)
+            yield result()
+        async def watch(native, interaction):
+            await asyncio.Event().wait()
+        await self.drive(stream, watch, approval_mode='allow', mcp_mode='ask')
 
     async def test_native_question_callback_waits_for_verified_matrix_answer(self):
         async def stream(options, client, interaction):

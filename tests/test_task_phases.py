@@ -39,6 +39,14 @@ class TaskPhases(unittest.TestCase):
         event = {"event_id": "$input", "room_id": "!room:at", "_task_protocol_meta": {"teamharness_coordination": packet}}
         return self.adapter.prepare(event, role)
 
+    def test_ordinary_followup_keeps_transport_room_for_task_continuation(self):
+        self.rpc.return_value = []
+        event = {"event_id": "$followup", "room_id": "!room:at", "sender": "@leader:at"}
+        context = self.adapter.prepare(event, "worker")
+        self.assertEqual(context["sourceRoom"], "!room:at")
+        self.assertNotIn("execution", context)
+        self.recovery.claim.assert_not_called()
+
     def test_leader_phases_require_admission(self):
         for kind in ("handoff", "task_submitted", "main_task_ready"):
             with self.subTest(kind=kind):

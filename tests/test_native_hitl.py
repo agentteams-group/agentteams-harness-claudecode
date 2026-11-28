@@ -16,7 +16,7 @@ from turn import run_turn
 
 
 class NativeHitlTests(unittest.TestCase):
-    def native(self, name, fields, approve=True, control=None, thinking=None):
+    def native(self, name, fields, approve=True, control=None, thinking=None, task=False, verify_supplement=False, retained_context=None):
         with tempfile.TemporaryDirectory() as directory, ThreadingHTTPServer(("127.0.0.1", 0), Wire) as http:
             threading.Thread(target=http.serve_forever, daemon=True).start()
             self.addCleanup(http.shutdown)
@@ -36,7 +36,7 @@ class NativeHitlTests(unittest.TestCase):
                 events = []
                 for content in sent:
                     approval = content.get("org.agentteams.approval")
-                    if approval and approval["status"] == "pending":
+                    if approval and approval["status"] == "pending" and approve is not None:
                         events.append(message("Decision", "$permission"))
                         events[-1]["content"]["com.agentteams.answer"] = {
                             "kind": "tool_approval", "agent_id": "@cc:at", "confirmation_id": approval["request_id"],
@@ -59,10 +59,24 @@ class NativeHitlTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True):
                 self.last_data = {"events": {}}
                 interaction = MatrixTurn(matrix, record, event, self.last_data, Mock())
+                if verify_supplement:
+                    confirm = interaction.confirm_inputs
+                    def confirm_task_input(message):
+                        # Exercise the Task receipt boundary with the real CLI's queued input.
+                        for item in self.last_data.get('steers', {}).values():
+                            item['task_supplement'] = True
+                        return confirm(message)
+                    interaction.confirm_inputs = confirm_task_input
+                task_context = ({"execution": "child", "identity": {"task_id": "child", "team_id": "team"},
+                                 "context": {"outputDirectory": str(root)}} if task else {})
+                if retained_context is not None:
+                    task_context['retained_context'] = retained_context
                 try:
                     answer = asyncio.run(run_turn(record, {"models": [{"id": "claude-sonnet-4-6"}],
                         "baseUrl": f"http://127.0.0.1:{http.server_port}/route", "apiKey": "fixture-gateway"},
-                        root, "Complete the task", None, {}, ROOT / "plugins/teamharness", interaction=interaction))
+                        root, "Complete the task", None,
+                        task_context,
+                        ROOT / "plugins/teamharness", interaction=interaction))
                 except TurnStopped:
                     time.sleep(3.5)
                     self.late_file_exists = (root / "approved.txt").exists()
@@ -86,12 +100,46 @@ class NativeHitlTests(unittest.TestCase):
                 receipts = [c["org.agentteams.approval"] for c in sent if "org.agentteams.approval" in c]
                 self.assertEqual([r["status"] for r in receipts], ["pending", "approved" if approved else "rejected"])
 
+    def test_real_native_task_permission_denial_has_no_started_operation(self):
+        for decision in (False, None):
+            with self.subTest(decision=decision), patch("turn.Recovery") as factory, patch("turn.persist_terminal") as persist:
+                recovery = factory.return_value
+                recovery.begin_tools.return_value = "tools:permission"
+                recovery.finish_tools.return_value = {"execution": {}}
+                _, sent, _, exists = self.native("Bash", {"command": "printf denied > approved.txt"}, approve=decision, task=True)
+                self.assertFalse(exists)
+                call = recovery.begin_tools.call_args.args[1][0]
+                self.assertIn("permission_denied", call["pre_effect_error_codes"])
+                recovery.finish_tools.assert_called_once()
+                receipt = recovery.finish_tools.call_args.args[2][0]
+                self.assertEqual({k: receipt[k] for k in ("id", "status", "effect", "error_code")},
+                                 {"id": call["id"], "status": "error", "effect": "none", "error_code": "permission_denied"})
+                persist.assert_called_once()
+                statuses = [c["org.agentteams.approval"]["status"] for c in sent if "org.agentteams.approval" in c]
+                self.assertEqual(statuses, ["pending", "rejected" if decision is False else "expired"])
+
     def test_real_native_steer_consumes_the_supplementary_uuid(self):
         answer, _, history, exists = self.native("Bash", {"command": "sleep 1; printf ok > approved.txt"}, control="steer")
         self.assertTrue(exists)
         self.assertEqual(answer[1], "second-ok")
         self.assertIn("second-turn", history)
         self.assertEqual(self.last_data["steers"]["$supplement"]["status"], "consumed")
+
+    def test_real_native_task_steer_proves_persisted_queued_input(self):
+        with patch('worker_matrix_state.WorkerMatrix') as matrix, \
+                patch('runtime_control.retire_native_supplement') as retire:
+            matrix.return_value.native_current.return_value = False
+            answer, _, _, _ = self.native('Bash', {'command': 'sleep 1; printf ok > approved.txt'},
+                                          control='steer', verify_supplement=True)
+            self.assertEqual(answer[1], 'second-ok')
+            self.assertEqual(self.last_data['steers']['$supplement']['status'], 'consumed')
+            matrix.return_value.native_committed.assert_called_once()
+            retire.assert_called_once()
+
+    def test_real_native_launch_with_large_retained_task_context(self):
+        answer, _, _, _ = self.native('Bash', {'command': 'printf ok > approved.txt'},
+                                      retained_context='原始任务记录' * 20000)
+        self.assertEqual(answer[1], 'first-ok')
 
     def test_real_native_stop_terminates_the_running_shell(self):
         with self.assertRaises(TurnStopped):

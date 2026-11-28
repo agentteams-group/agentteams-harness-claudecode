@@ -13,7 +13,7 @@ from mcp.common.task_context import COORDINATION_PHASES
 
 
 def prepare(event, role):
-    context = {"role": role, "sourceEvent": event["event_id"], "sources": [],
+    context = {"role": role, "sourceEvent": event["event_id"], "sourceRoom": event["room_id"], "sources": [],
                "actor": os.environ.get("AGENTTEAMS_MATRIX_USER_ID", "")}
     packet = (event.get("_task_protocol_meta") or {}).get("teamharness_coordination")
     if packet:
@@ -46,6 +46,8 @@ def prepare(event, role):
         context["sources"] = task_native.invoke({"operation": "sources", "meta": {
             "event_id": event["event_id"], "room_id": event["room_id"], "sender_id": event["sender"],
             **({"matrix_input_sources": event["frames"]} if event.get("frames") else {})}})
+    if not packet and os.getenv("AGENTTEAMS_CONTROLLER_URL"):
+        context.update(task_native.invoke({"operation": "room_context", "room": event["room_id"]}))
     if os.getenv("AGENTTEAMS_CONTROLLER_URL") and (role == "manager" or context.get("planning")):
         context["roster"] = task_native.invoke({"operation": "roster", "role": role,
             "team": os.environ.get("AGENTTEAMS_TEAM_NAME") if role == "leader" else None})
@@ -131,4 +133,4 @@ if __name__ == "__main__":
         data = json.load(sys.stdin)
         print(json.dumps(prepare(data["event"], data["role"]), default=str))
     else:
-        serve(json.loads(os.environ["AT_CLAUDE_TASK_CONTEXT"]))
+        serve(json.loads(Path(os.environ["AT_CLAUDE_TASK_CONTEXT_FILE"]).read_text()))

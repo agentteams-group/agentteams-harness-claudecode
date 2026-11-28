@@ -48,3 +48,27 @@ The matched Core contract is pinned to `ec78d76184a4db7db39cc6fb3c8282689ccd7a73
 For a verified planning wake, check the exact Matrix event against the Controller receipt and require a Chinese overview before dispatch. Publish the goal, requirements, acceptance criteria, assignments and selected outputs in the Task room. Keep the original source event for routing; use one execution-generation run ID for recovered tool activity and the saved stage result. Check the original Human conversation for the acceptance report and each selected file card. Open each card and verify its bytes against the accepted submission.
 
 When Matrix dispatch finishes after a Worker has submitted, recover the pending event IDs from that exact native Task tool result. Verify the sender, node and Matrix event against the Controller. Record the confirmed fact in the submitting SDK session. In SDK 0.2.187 the UserPromptSubmit hook with `continue_=False` persists the input without requesting a model response. Check the stored message and verify a later normal resume sees it exactly once. The hook's `decision=block` does not preserve the input in the model's resumed context. Keep this receipt out of the Matrix chat timeline.
+
+## Approval and retained notification recovery
+
+A native can_use_tool denial is a pre-execution terminal fact. Declare permission_denied at admission, persist the matching call's no-effect receipt, and settle it before returning PermissionResultDeny. Apply this to Human rejection, deadline expiry and unavailable interaction. Do not infer no effect from arbitrary Bash failure, interruption or background execution. Real CLI tests cover rejected and expired approvals with absent output files, plus partial-write failures that remain unverified.
+
+A verified Task assignment retained under an older ordinary-message classification must go to the existing Task recovery loop, never a second ordinary inference path. Cancel only an unused ordinary claim with no checkpoint; preserve unknown ordinary operations for verification. Keep the original immutable Matrix source and Task assignment. Do not clear input history or reset execution generations to handle this upgrade case.
+
+
+## Persisted running-turn supplements
+
+When a ResultMessage lists a consumed supplementary UUID, verify the corresponding native transcript before retiring Core's ordinary input. Claude CLI may persist the exact input as either a normal `user` row (`uuid`) or an `attachment` with `type=queued_command`, `commandMode=prompt`, and `source_uuid`. Require the same session, input UUID and admitted prompt bytes, and exclude sidechain/meta rows. The attachment's own row UUID is not the source input UUID. Do not treat an arbitrary attachment or a stdin write as proof of consumption.
+
+Test Task supplements during an actual running tool call with the bundled CLI, with Task-native persistence verification enabled. A direct-message steer test that checks only ResultMessage UUIDs does not cover this boundary. Keep Core's admission/retirement contract shared; implement native transcript formats in this Harness.
+
+
+## Internal context transport
+
+Pass the prepared Task context to the stdio MCP child through a private per-turn file in the existing temporary plugin directory. The MCP configuration contains only `AT_CLAUDE_TASK_CONTEXT_FILE`, not serialized Task data. Large retained metadata can exceed the operating system's single-argument limit when the SDK serializes MCP configuration into CLI arguments. Preserve the complete JSON and the directory's turn lifetime; do not truncate Task context or change Core's wire format to work around a native launch limit. Verify a real bundled CLI launch with retained context larger than that limit, as well as normal execution and decision phases.
+
+## Declared gateway models and native replay
+
+For a saved Responses gateway model absent from LiteLLM's public model map, register its Responses streaming/reasoning transport capabilities before conversion. Otherwise LiteLLM treats the unknown model as non-streaming and buffers a requested SSE response. Preserve capabilities for known models; never replace their declared non-streaming behavior or change reasoning/output budgets to conceal a timeout. Verify the actual outbound Responses body has `stream: true`, not just the local Anthropic response header. Native pings only keep the SDK connection alive; they do not prove upstream model content.
+
+Native CLI request journals can reference coalesced MCP tool-result messages instead of duplicating request blobs. Reconstruct only messages whose canonical content matches the native request's hash. The replay can normalize trailing tool-result whitespace; label it as native replay evidence, rather than claiming byte-identical HTTP capture. Verify multi-call inputs and output independently, and retain missing references as an explicit gap.

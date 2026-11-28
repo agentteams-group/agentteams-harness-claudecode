@@ -44,6 +44,30 @@ def transcript_digest(projects, ref):
     return None
 
 
+def remember_checkpoint(state, sessions, work, recovery, native_ref, call_id, saved_execution):
+    logs = list(state.projects.glob("*/" + native_ref + ".jsonl")) if transcript_digest(state.projects, native_ref) else []
+    if len(logs) != 1:
+        return False
+    transcript = logs[0]
+    data = transcript.read_bytes()
+    try:
+        rows = [json.loads(line) for line in data.splitlines() if line]
+    except ValueError:
+        return False
+    if not any(block.get("tool_use_id") == call_id and block.get("type") == "tool_result"
+               for row in rows if row.get("type") == "user" for content in [row.get("message", {}).get("content")]
+               if isinstance(content, list) for block in content if isinstance(block, dict)):
+        return False
+    view = sessions.load(work)
+    if view["checkpoint_digest"] != recovery.digest(saved_execution.get("checkpoint")):
+        return False
+    if state.remote:
+        destination = state.remote + "/claude-code/projects/" + transcript.relative_to(state.projects).as_posix()
+        subprocess.run(["mc", "pipe", destination], input=data, check=True, capture_output=True, timeout=30)
+    sessions.remember(work, view, saved_execution, native_ref, hashlib.sha256(data).hexdigest(), int(time.time()) + 86400)
+    return True
+
+
 def verified_read_result(projects, workspace, checkpoint):
     """Find the exact SDK tool result in this Task's native transcript."""
     operation = (checkpoint or {}).get("operation") or {}
@@ -89,7 +113,8 @@ def verified_read_result(projects, workspace, checkpoint):
 
 
 def task_run_id(task, team):
-    return f"claudecode:task:{team}:{task['task_id']}:{task['execution']['generation']}"
+    from runtime_control import task_run_id as common_run_id
+    return common_run_id(team, task['task_id'], task['execution']['generation'])
 
 
 def deliver(client, recovery, record, task, team, answer):
@@ -122,6 +147,10 @@ def recover_work(state, client, record, provider, assignments):
             claimed = recovery.claim(snapshot, entry)
         except RecoveryConflict:
             continue  # A concurrent claim or a completed assignment invalidated this ETag.
+        from runtime_control import retired_task_runs, retired_run_delivered
+        for ending in retired_task_runs(entry['team_id'], claimed['task'], recovery.process):
+            ending_event = client.send_content(ending['room_id'], ending['content'], ending['transaction'])
+            retired_run_delivered(recovery.process, ending['transaction'], ending_event)
         claims.append((claimed, entry["team_id"]))
     recovery_scanned()
     for claimed, team in claims:
@@ -194,33 +223,13 @@ def recover_work(state, client, record, provider, assignments):
         if source:
             prompt += "\n[Message " + source["event_id"] + "]\n" + source["body"]
         trace("task.resume", task_id=task_id, generation=execution["generation"], reused_session=bool(session))
-        def remember_checkpoint(native_ref, call_id, saved_execution):
-            logs = list(state.projects.glob("*/" + native_ref + ".jsonl")) if transcript_digest(state.projects, native_ref) else []
-            if len(logs) != 1:
-                return False
-            transcript = logs[0]
-            data = transcript.read_bytes()
-            try:
-                rows = [json.loads(line) for line in data.splitlines() if line]
-            except ValueError:
-                return False
-            if not any(block.get("tool_use_id") == call_id and block.get("type") == "tool_result"
-                       for row in rows for content in [row.get("message", {}).get("content")]
-                       if isinstance(content, list) for block in content if isinstance(block, dict)):
-                return False
-            view = sessions.load(work)
-            if view["checkpoint_digest"] != recovery.digest(saved_execution.get("checkpoint")):
-                return False
-            if state.remote:
-                destination = state.remote + "/claude-code/projects/" + transcript.relative_to(state.projects).as_posix()
-                subprocess.run(["mc", "pipe", destination], input=data, check=True, capture_output=True, timeout=30)
-            sessions.remember(work, view, saved_execution, native_ref, hashlib.sha256(data).hexdigest(), int(time.time()) + 86400)
-            return True
+        def cache_checkpoint(native_ref, call_id, saved_execution):
+            return remember_checkpoint(state, sessions, work, recovery, native_ref, call_id, saved_execution)
 
         admin = ((record.get("team") or {}).get("admin") or {}).get("matrixUserId")
         event = {"event_id": source_id or f"task:{task_id}:{execution['generation']}", "room_id": task["room_id"],
                  "sender": source.get("sender") or admin or record["member"]["matrixUserId"],
-                 "coordination_session": task_id, "run_id": context["runId"]}
+                 "coordination_session": task_id, "run_id": context["runId"], "task_execution": identity}
         interaction = MatrixTurn(client, record, event, state.data, state.save)
         def current():
             saved = recovery.current(task_id, team)
@@ -235,7 +244,7 @@ def recover_work(state, client, record, provider, assignments):
         interaction.current = current
         try:
             ref, answer = asyncio.run(run_turn(record, provider, directory, prompt, session, context,
-                Path(os.environ["AGENTTEAMS_PLUGIN_DIR"]), on_checkpoint=remember_checkpoint, interaction=interaction))
+                Path(os.environ["AGENTTEAMS_PLUGIN_DIR"]), on_checkpoint=cache_checkpoint, interaction=interaction))
         except TurnStopped:
             continue  # Cancellation is authoritative; never submit a synthetic completion.
         if (context.get("_completed") or {}).get("pendingHandoffs"):
